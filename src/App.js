@@ -10,6 +10,10 @@ import logo from "./meetup_confirmation.png";
 import { addresses, abis } from "./contracts";
 
 // Coordinates on-chain are stored scaled by COORD_SCALE (microdegrees)
+const COORD_SCALE = 1e6;
+const MAX_DISTANCE_METERS = 200; // max distance from meeting point (meters)
+
+// DEV fallback (example values)
 const EXPECTED_LOCATION = {
   lat: 52.520008, // e.g., Berlin
   lon: 13.404954,
@@ -100,6 +104,14 @@ function App() {
   const [gpsInfo, setGpsInfo] = useState(null);
   const [status, setStatus] = useState("");
 
+  // meeting info from contract
+  const [meetingLocation, setMeetingLocation] = useState(null);
+  const [meetingTimeHuman, setMeetingTimeHuman] = useState("");
+
+  const DEV_ALLOW_FALLBACK = true;
+  const DEV_FALLBACK_MEETING = EXPECTED_LOCATION;
+  const DEV_FALLBACK_TIME = Math.floor(Date.now() / 1000) + 3600;
+
   // ask wallet access
   useEffect(() => {
     window.ethereum?.enable?.();
@@ -118,6 +130,33 @@ function App() {
       }
     }
     readFile();
+  }, []);
+
+  // read meeting coordinates + meeting time from the contract once on load
+  useEffect(() => {
+    async function loadMeetingInfo() {
+      try {
+        const [latScaled, lonScaled, mt] = await Promise.all([
+          meetupContract.meetingLat(),
+          meetupContract.meetingLon(),
+        ]);
+        const latNum = Number(latScaled.toString());
+        const lonNum = Number(lonScaled.toString());
+
+        if (latNum || lonNum) {
+          setMeetingLocation({ lat: latNum / COORD_SCALE, lon: lonNum / COORD_SCALE });
+        } else if (DEV_ALLOW_FALLBACK) {
+          setMeetingLocation(DEV_FALLBACK_MEETING);
+        }
+
+      } catch (e) {
+        console.warn("loadMeetingInfo failed:", e?.message ?? e);
+        if (DEV_ALLOW_FALLBACK) {
+          setMeetingLocation(DEV_FALLBACK_MEETING);
+        }
+      }
+    }
+    loadMeetingInfo();
   }, []);
 
   // save IPFS-CID in Smart Contract as Arrival-Proof

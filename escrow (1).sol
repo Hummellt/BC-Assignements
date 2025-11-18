@@ -7,6 +7,9 @@ contract MeetupContract {
     address payable public participant1;  
     address payable public participant2;  
     uint256 public meetingTime;
+    // meeting coordinates stored as signed integers scaled by 1e6 (microdegrees)
+    int256 public meetingLat;
+    int256 public meetingLon;
     uint256 public depositAmount;
     bool public arrived1;
     bool public arrived2;
@@ -28,8 +31,10 @@ contract MeetupContract {
 
     constructor(
         address payable _participant1,
-        address payable _participant2, 
+        address payable _participant2,
         uint256 _meetingTime,
+        int256 _meetingLat,
+        int256 _meetingLon,
         uint256 _depositAmount,
         uint256 _penaltyRatePerMinute
     ) {
@@ -40,6 +45,9 @@ contract MeetupContract {
         participant1 = _participant1;  
         participant2 = _participant2; 
         meetingTime = _meetingTime;
+        // store scaled coordinates
+        meetingLat = _meetingLat;
+        meetingLon = _meetingLon;
         depositAmount = _depositAmount;
         penaltyRatePerMinute = _penaltyRatePerMinute;
     }
