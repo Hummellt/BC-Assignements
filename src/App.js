@@ -97,6 +97,42 @@ async function stripExif(fileObj) {
   });
 }
 
+// Small OpenStreetMap embed to show the meeting location
+function MeetingMap({ lat, lon, zoom = 15, width = 320, height = 220 }) {
+  if (lat == null || lon == null) return null;
+  const delta = 0.02;
+  const left = lon - delta;
+  const bottom = lat - delta;
+  const right = lon + delta;
+  const top = lat + delta;
+  const src = `https://www.openstreetmap.org/export/embed.html?bbox=${encodeURIComponent(
+    left
+  )}%2C${encodeURIComponent(bottom)}%2C${encodeURIComponent(right)}%2C${encodeURIComponent(
+    top
+  )}&layer=mapnik&marker=${encodeURIComponent(lat)}%2C${encodeURIComponent(lon)}`;
+
+  return (
+    <div style={{ marginTop: 8 }}>
+      <div
+        style={{
+          width: width,
+          height: height,
+          border: "1px solid #ccc",
+          borderRadius: 4,
+          overflow: "hidden",
+        }}
+      >
+        <iframe
+          title="meeting-location"
+          src={src}
+          style={{ border: 0, width: "100%", height: "100%" }}
+          loading="lazy"
+        />
+      </div>
+    </div>
+  );
+}
+
 function App() {
   const [ipfsHash, setIpfsHash] = useState("");
   const [file, setFile] = useState(null); // bereinigtes Bild (ohne EXIF) als Buffer
@@ -139,9 +175,11 @@ function App() {
         const [latScaled, lonScaled, mt] = await Promise.all([
           meetupContract.meetingLat(),
           meetupContract.meetingLon(),
+          meetupContract.meetingTime(),
         ]);
         const latNum = Number(latScaled.toString());
         const lonNum = Number(lonScaled.toString());
+        const mtNum = Number(mt.toString());
 
         if (latNum || lonNum) {
           setMeetingLocation({ lat: latNum / COORD_SCALE, lon: lonNum / COORD_SCALE });
@@ -149,10 +187,16 @@ function App() {
           setMeetingLocation(DEV_FALLBACK_MEETING);
         }
 
+        if (mtNum) {
+          setMeetingTimeHuman(new Date(mtNum * 1000).toLocaleString());
+        } else if (DEV_ALLOW_FALLBACK) {
+          setMeetingTimeHuman(new Date(DEV_FALLBACK_TIME * 1000).toLocaleString());
+        }
       } catch (e) {
         console.warn("loadMeetingInfo failed:", e?.message ?? e);
         if (DEV_ALLOW_FALLBACK) {
           setMeetingLocation(DEV_FALLBACK_MEETING);
+          setMeetingTimeHuman(new Date(DEV_FALLBACK_TIME * 1000).toLocaleString());
         }
       }
     }
@@ -298,7 +342,29 @@ function App() {
   return (
     <div className="App">
       <header className="App-header">
-        <img src={logo} className="App-logo" alt="logo" />
+
+        {/* Meeting box: map, coordinates and time */}
+        <div style={{ width: 560, maxWidth: "100%", background: "#fff", padding: 12, borderRadius: 8, marginBottom: 12 }}>
+          <h3 style={{ margin: "0 0 8px 0", color: "#333" }}>Meeting</h3>
+          {meetingLocation ? (
+            <div style={{ display: "flex", gap: 12, alignItems: "flex-start", flexWrap: "wrap" }}>
+              <div style={{ flex: "0 0 240px", minWidth: 200 }}>
+                <MeetingMap lat={meetingLocation.lat} lon={meetingLocation.lon} width={240} height={140} />
+              </div>
+              <div style={{ flex: "1 1 260px", minWidth: 180 }}>
+                <div style={{ fontSize: 13, color: "#333" }}>Coordinates</div>
+                <div style={{ fontSize: 14, marginTop: 6, color: "#333" }}>
+                  {meetingLocation.lat.toFixed(6)}, {meetingLocation.lon.toFixed(6)}
+                </div>
+                <div style={{ marginTop: 10, fontSize: 13, color: "#333" }}>Time</div>
+                <div style={{ fontSize: 14, marginTop: 6, color: "#333" }}>{meetingTimeHuman}</div>
+              </div>
+            </div>
+          ) : (
+            <div>Loading meeting info…</div>
+          )}
+        </div>
+
         <p>
           Upload a photo as arrival evidence. GPS is checked against the meetup
           location, EXIF is stripped, and the cleaned image is stored on IPFS.
