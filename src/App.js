@@ -181,29 +181,52 @@ function App() {
       setLocationOk(false);
       setGpsInfo(null);
 
-      const arrayBuffer = await fileObj.arrayBuffer();
-      const exif = await exifr.parse(arrayBuffer, [
-        "gpsLatitude",
-        "gpsLongitude",
-      ]);
+      // robust exif parsing: try parse with helpers and fallback to full parse
+      let exif = null;
+      try {
+        // exifr can parse ArrayBuffer or File directly
+        exif = await exifr.parse(fileObj).catch(() => null);
+      } catch (err) {
+        exif = null;
+      }
 
-      if (!exif || exif.gpsLatitude == null || exif.gpsLongitude == null) {
-        alert("No GPS info found in this image.");
+      // normalize possible EXIF fields into decimal lat/lon
+      const toDecimal = (val, ref) => {
+        if (val == null) return null;
+        if (Array.isArray(val)) {
+          const [deg = 0, min = 0, sec = 0] = val;
+          let dec = deg + min / 60 + sec / 3600;
+          if (ref === "S" || ref === "W") dec = -dec;
+          return dec;
+        }
+        if (typeof val === "number") return val;
+        const n = Number(val);
+        return Number.isFinite(n) ? n : null;
+      };
+
+      let lat = null;
+      let lon = null;
+      if (exif) {
+        const latRaw = exif.latitude ?? exif.gpsLatitude ?? exif.GPSLatitude;
+        const lonRaw = exif.longitude ?? exif.gpsLongitude ?? exif.GPSLongitude;
+        const latRef = exif.GPSLatitudeRef ?? exif.gpsLatitudeRef;
+        const lonRef = exif.GPSLongitudeRef ?? exif.gpsLongitudeRef;
+        lat = toDecimal(latRaw, latRef);
+        lon = toDecimal(lonRaw, lonRef);
+      }
+
+      if (lat == null || lon == null) {
+        alert("No GPS info found in the image EXIF. Upload aborted.");
         setStatus("No GPS info in image.");
         return;
       }
 
-      const lat = exif.gpsLatitude;
-      const lon = exif.gpsLongitude;
       setGpsInfo({ lat, lon });
 
-      const dist = distanceMeters(
-        lat,
-        lon,
-        EXPECTED_LOCATION.lat,
-        EXPECTED_LOCATION.lon
-      );
-      console.log("Distance to meetup (m):", dist);
+      // choose target location: on-chain meetingLocation if available, otherwise fallback
+      const target = meetingLocation ?? EXPECTED_LOCATION;
+      const dist = distanceMeters(lat, lon, target.lat, target.lon);
+      console.log("Image coords", { lat, lon }, "target", target, "distance m", dist);
 
       if (dist > MAX_DISTANCE_METERS) {
         alert(
@@ -217,13 +240,9 @@ function App() {
       }
 
       setLocationOk(true);
-      setStatus(
-        `Location OK (~${Math.round(
-          dist
-        )} m from meetup). Stripping EXIF…`
-      );
+      setStatus(`Location OK (~${Math.round(dist)} m). Stripping EXIF…`);
 
-      // EXIF stripping und in Buffer umwandeln
+      // EXIF stripping and convert to Buffer 
       const cleanedBlob = await stripExif(fileObj);
       const cleanedArrayBuffer = await cleanedBlob.arrayBuffer();
       const cleanedBuffer = Buffer.from(cleanedArrayBuffer);
