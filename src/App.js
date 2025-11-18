@@ -205,11 +205,87 @@ function App() {
 
   // save IPFS-CID in Smart Contract as Arrival-Proof
   async function confirmArrivalOnChain(hash) {
-    const contractWithSigner = meetupContract.connect(defaultProvider.getSigner());
-    const tx = await contractWithSigner.confirmArrivalWithProof(hash);
-    console.log("TX contract", tx.hash);
-    await tx.wait();
-    setIpfsHash(hash);
+    const signer = defaultProvider.getSigner();
+    let signerAddr;
+    try {
+      signerAddr = await signer.getAddress();
+    } catch (e) {
+      console.error("Wallet/signature unavailable:", e);
+      throw new Error("Wallet not connected. Open your wallet and connect the account.");
+    }
+
+    const contractWithSigner = meetupContract.connect(signer);
+
+    // --- NEW: diagnostics: contract address / expected address / network ---
+    try {
+      const network = await defaultProvider.getNetwork();
+      console.log("Provider network:", network);
+    } catch (nerr) {
+      console.warn("Could not read provider network:", nerr);
+    }
+    console.log("meetupContract.address:", meetupContract.address);
+    console.log("addresses.meetup (expected):", addresses.meetup);
+
+    // read on-chain state for sanity checks
+    let participant1, participant2, meetingTime;
+    try {
+      [participant1, participant2, meetingTime] = await Promise.all([
+        meetupContract.participant1(),
+        meetupContract.participant2(),
+        meetupContract.meetingTime(),
+      ]);
+    } catch (e) {
+      console.error("Failed reading contract state:", e);
+    }
+
+    // ensure we compare strings
+    const p1 = participant1 ? String(participant1) : null;
+    const p2 = participant2 ? String(participant2) : null;
+
+    console.log("Signer:", signerAddr);
+    console.log("Participants:", p1, p2);
+    console.log("MeetingTime (bn):", meetingTime?.toString());
+
+    // basic checks
+    if (p1 && p2) {
+      const s = signerAddr.toLowerCase();
+      if (s !== p1.toLowerCase() && s !== p2.toLowerCase()) {
+        throw new Error("Connected account is not a participant in this meetup contract.");
+      }
+    }
+
+    const now = Math.floor(Date.now() / 1000);
+    if (meetingTime && Number(meetingTime.toString()) > now) {
+      throw new Error("Meeting time not reached yet on-chain. confirmArrival requires block.timestamp >= meetingTime.");
+    }
+
+    const method =
+      typeof contractWithSigner.confirmArrival === "function"
+        ? "confirmArrival"
+        : typeof contractWithSigner.confirmArrivalWithProof === "function"
+        ? "confirmArrivalWithProof"
+        : null;
+
+    if (!method) {
+      const msg = "Contract does not expose confirmArrival(...) or confirmArrivalWithProof(...)";
+      console.error(msg, contractWithSigner);
+      throw new Error(msg);
+    }
+
+    try {
+      const tx = await contractWithSigner[method](hash);
+      console.log("TX contract", tx.hash);
+      await tx.wait();
+      setIpfsHash(hash);
+    } catch (err) {
+      console.error("confirmArrival transaction failed:", err);
+      const reason =
+        err?.error?.message ||
+        err?.data?.message ||
+        err?.message ||
+        (typeof err === "string" ? err : JSON.stringify(err));
+      throw new Error(`Transaction failed: ${reason}`);
+    }
   }
 
   // Datei-Upload + IPFS
@@ -339,6 +415,36 @@ function App() {
     }
   };
 
+  async function runDiagnostics() {
+    try {
+      const signer = defaultProvider.getSigner();
+      const signerAddr = await signer.getAddress();
+      console.log("Connected signer:", signerAddr);
+
+      const [p1, p2, mt, depositAmount, contractBalance, ipfsForSigner] = await Promise.all([
+        meetupContract.participant1().catch(() => null),
+        meetupContract.participant2().catch(() => null),
+        meetupContract.meetingTime().catch(() => null),
+        meetupContract.depositAmount().catch(() => null),
+        defaultProvider.getBalance(meetupContract.address).catch(() => null),
+        meetupContract.arrivalProofIPFS(signerAddr).catch(() => ""),
+      ]);
+
+      console.log("participant1:", p1);
+      console.log("participant2:", p2);
+      console.log("meetingTime (bn):", mt?.toString());
+      console.log("depositAmount (bn):", depositAmount?.toString());
+      console.log("contract balance (wei):", contractBalance?.toString());
+      console.log("arrivalProofIPFS for signer:", ipfsForSigner);
+      console.log("meetupContract.address:", meetupContract.address);
+      console.log("addresses.meetup (expected):", addresses.meetup);
+      alert("Diagnostics logged to console.");
+    } catch (e) {
+      console.error("Diagnostics failed:", e);
+      alert("Diagnostics failed: " + (e?.message ?? e));
+    }
+  }
+
   return (
     <div className="App">
       <header className="App-header">
@@ -374,6 +480,9 @@ function App() {
           <input type="file" name="data" accept="image/*" onChange={retrieveFile} />
           <button type="submit" className="btn">
             Upload & Confirm Arrival
+          </button>
+          <button type="button" className="btn" onClick={runDiagnostics} style={{ marginLeft: 8 }}>
+            Run Diagnostics
           </button>
         </form>
 
