@@ -9,12 +9,11 @@ import exifr from "exifr";
 import logo from "./meetup_confirmation.png";
 import { addresses, abis } from "./contracts";
 
-// ---- Meetup location (Beispielwerte, anpassen für euren Case) ----
+// Coordinates on-chain are stored scaled by COORD_SCALE (microdegrees)
 const EXPECTED_LOCATION = {
-  lat: 52.520008,   // z.B. Berlin
+  lat: 52.520008, // e.g., Berlin
   lon: 13.404954,
 };
-const MAX_DISTANCE_METERS = 200; // erlaubter Radius um den Treffpunkt
 
 const ZERO_ADDRESS =
   "0x0000000000000000000000000000000000000000000000000000000000000000";
@@ -31,7 +30,7 @@ const meetupContract = new ethers.Contract(
   defaultProvider
 );
 
-// ---- Hilfsfunktionen für Distanzberechnung ----
+// ---- Helper functions for distance calculation ----
 function deg2rad(deg) {
   return (deg * Math.PI) / 180;
 }
@@ -52,7 +51,7 @@ function distanceMeters(lat1, lon1, lat2, lon2) {
   return R * c;
 }
 
-// Aktuell im Contract gespeicherten IPFS-Hash für den User lesen
+// Read the IPFS hash currently stored in the contract for the connected user
 async function readCurrentUserIpfsHash() {
   const addr = await defaultProvider.getSigner().getAddress();
   const result = await meetupContract.arrivalProofIPFS(addr);
@@ -60,7 +59,7 @@ async function readCurrentUserIpfsHash() {
   return result;
 }
 
-// EXIF stripping: Bild in <canvas> zeichnen und neu als JPEG exportieren
+// EXIF stripping: draw image into a <canvas> and export a new JPEG without EXIF
 async function stripExif(fileObj) {
   return new Promise((resolve, reject) => {
     const img = new Image();
@@ -101,12 +100,12 @@ function App() {
   const [gpsInfo, setGpsInfo] = useState(null);
   const [status, setStatus] = useState("");
 
-  // Wallet-Zugriff anfragen
+  // ask wallet access
   useEffect(() => {
     window.ethereum?.enable?.();
   }, []);
 
-  // Beim Laden evtl. bereits gespeicherten IPFS-Hash anzeigen
+  //  IPFS HASH
   useEffect(() => {
     async function readFile() {
       try {
@@ -121,11 +120,9 @@ function App() {
     readFile();
   }, []);
 
-  // IPFS-CID im Smart Contract als Arrival-Proof speichern
+  // save IPFS-CID in Smart Contract as Arrival-Proof
   async function confirmArrivalOnChain(hash) {
-    const contractWithSigner = meetupContract.connect(
-      defaultProvider.getSigner()
-    );
+    const contractWithSigner = meetupContract.connect(defaultProvider.getSigner());
     const tx = await contractWithSigner.confirmArrivalWithProof(hash);
     console.log("TX contract", tx.hash);
     await tx.wait();
@@ -155,7 +152,11 @@ function App() {
       const result = await client.add(file);
 
       // optional: im lokalen Node unter /<cid> erreichbar machen
-      await client.files.cp(`/ipfs/${result.cid}`, `/${result.cid}`);
+      try {
+        await client.files.cp(`/ipfs/${result.cid}`, `/${result.cid}`);
+      } catch (e) {
+        // ignore if files API not available
+      }
 
       const cidStr = result.cid.toString();
       console.log("IPFS CID:", cidStr);
@@ -170,7 +171,7 @@ function App() {
     }
   };
 
-  // Datei auswählen → EXIF lesen, Location checken, EXIF strippen
+  // choose file, check Location, EXIF strippen
   const retrieveFile = async (e) => {
     const fileObj = e.target.files[0];
     if (!fileObj) return;
@@ -231,7 +232,7 @@ function App() {
       setStatus("Ready to upload cleaned image to IPFS.");
     } catch (err) {
       console.log(err);
-      setStatus(`Error while reading EXIF: ${err.message}`);
+      setStatus(`Error while reading EXIF: ${err.message ?? err}`);
       setLocationOk(false);
     }
   };
@@ -256,8 +257,7 @@ function App() {
 
         {gpsInfo && (
           <p>
-            Detected GPS: lat {gpsInfo.lat.toFixed(5)}, lon{" "}
-            {gpsInfo.lon.toFixed(5)}
+            Detected GPS: lat {gpsInfo.lat.toFixed(5)}, lon {gpsInfo.lon.toFixed(5)}
           </p>
         )}
 
