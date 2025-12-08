@@ -29,6 +29,11 @@ contract EscrowContract is EIP712 {
     event Finalized(uint256 finalizationTime);
     event Withdrawn(address indexed participant, uint256 amount);
 
+    // EIP-712 typehash for Attestation
+    bytes32 private constant ATTESTATION_TYPEHASH = keccak256(
+        "Attestation(address arriver,address attester1,address attester2,uint256 timestamp)"
+    );
+
     constructor(
         address[] memory _participants,
         uint256 _meetingTime,
@@ -73,34 +78,42 @@ contract EscrowContract is EIP712 {
     ) external {
         require(isParticipant[msg.sender], "Not a participant");
         require(isParticipant[attester1] && isParticipant[attester2], "Attesters must be participants");
+        require(attester1 != msg.sender && attester2 != msg.sender, "Attesters cannot be the arriver");
+        require(attester1 != attester2, "Attesters must be distinct");
         require(contractState != State.Finalized, "Already finalized");
+
         require(bytes(ipfsHash).length > 0, "IPFS hash required");
         require(timestamp >= meetingTime, "Attestation cannot be from before the meeting time");
+        require(signature1.length == 65 && signature2.length == 65, "Invalid signature length");
 
-        // Verify the signatures
-        bytes32 structHash = _hashTypedDataV4(keccak256(abi.encode(
-            keccak256("Attestation(address arriver,address attester1,address attester2,uint256 timestamp)"),
-            msg.sender,
-            attester1,
-            attester2,
-            timestamp
-        )));
+        // Use the public helper so tests and contract build the same digest
+        bytes32 digest = hashAttestation(msg.sender, attester1, attester2, timestamp);
 
-        address recovered1 = ECDSA.recover(structHash, signature1);
-        address recovered2 = ECDSA.recover(structHash, signature2);
+        // Prefixed digest for eth_sign compatibility
+        bytes32 prefixed = keccak256(abi.encodePacked("\x19Ethereum Signed Message:\n32", digest));
 
+        address signer1 = ECDSA.recover(digest, signature1);
+        if (signer1 != attester1 && signer1 != attester2) {
+            signer1 = ECDSA.recover(prefixed, signature1);
+        }
+
+        address signer2 = ECDSA.recover(digest, signature2);
+        if (signer2 != attester1 && signer2 != attester2) {
+            signer2 = ECDSA.recover(prefixed, signature2);
+        }
+
+        require(signer1 != address(0) && signer2 != address(0), "Invalid signatures");
         require(
-            (recovered1 == attester1 && recovered2 == attester2) || (recovered1 == attester2 && recovered2 == attester1),
-            "Invalid signatures"
+            (signer1 == attester1 && signer2 == attester2) ||
+            (signer1 == attester2 && signer2 == attester1),
+            "Signatures must be from two distinct attesters"
         );
 
-        // Record arrival time for the caller, if not already recorded.
         if (arrivalTimes[msg.sender] == 0) {
             arrivalTimes[msg.sender] = timestamp;
             emit Arrived(msg.sender, timestamp);
         }
 
-        // Transition state if this is the first arrival confirmation
         if (contractState == State.Created) {
             contractState = State.InProgress;
         }
@@ -109,7 +122,7 @@ contract EscrowContract is EIP712 {
     }
 
 
-     // @dev Allows cancellation before any arrivals, refunding all participants.
+    // @dev Allows cancellation before any arrivals, refunding all participants.
     function cancelBeforeArrivals() external {
         require(contractState != State.Finalized, "Already finalized");
         require(contractState == State.Created, "Cannot cancel after arrivals have begun");
@@ -180,7 +193,7 @@ contract EscrowContract is EIP712 {
         uint256 timestamp
     ) public view returns (bytes32) {
         bytes32 structHash = keccak256(abi.encode(
-            keccak256("Attestation(address arriver,address attester1,address attester2,uint256 timestamp)"),
+            ATTESTATION_TYPEHASH,
             arriver,
             attester1,
             attester2,
