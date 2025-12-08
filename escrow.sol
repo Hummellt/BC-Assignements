@@ -19,11 +19,14 @@ contract MeetupContract {
     bool public cancelRequest1;
     bool public cancelRequest2;
 
-    // NEW: stores IPFS hashes with the arrival proofs
+    // stores IPFS hashes with the arrival proofs
     mapping(address => string) public arrivalProofIPFS;
 
-    // NEW: Secure withdrawal pattern state
+    // Secure withdrawal pattern state
     mapping(address => uint256) public balances;
+
+    // Store individual arrival times to fix penalty calculation
+    mapping(address => uint256) public arrivalTimes;
 
     // Events
     event Deposited(address indexed participant, uint256 amount);
@@ -81,13 +84,15 @@ contract MeetupContract {
         arrivalProofIPFS[msg.sender] = ipfsHash;
         emit ArrivalProofSubmitted(msg.sender, ipfsHash);
 
+        uint256 arrival = block.timestamp;
+        arrivalTimes[msg.sender] = arrival;
+
         if (msg.sender == participant1) {
             arrived1 = true;
         } else {
             arrived2 = true;
         }
-
-        emit Arrived(msg.sender, block.timestamp);
+        emit Arrived(msg.sender, arrival);
     }
 
     // Cancellation function (both must agree, within 5 minutes)
@@ -125,8 +130,8 @@ contract MeetupContract {
         bool bothArrived = arrived1 && arrived2;
 
         if (bothArrived) {
-            uint256 penalty1 = _calculatePenalty();
-            uint256 penalty2 = _calculatePenalty();
+            uint256 penalty1 = _calculatePenalty(arrivalTimes[participant1]);
+            uint256 penalty2 = _calculatePenalty(arrivalTimes[participant2]);
 
             if (penalty1 == 0 && penalty2 == 0) {
                 _refundBoth();
@@ -146,7 +151,8 @@ contract MeetupContract {
             // Only one participant arrived
             address lateParticipant = !arrived1 ? participant1 : participant2;
             address onTimeParticipant = arrived1 ? participant1 : participant2;
-            uint256 penalty = _calculatePenalty();
+            uint256 penalty = _calculatePenalty(arrivalTimes[onTimeParticipant]);
+
             balances[onTimeParticipant] += penalty;
             balances[lateParticipant] += depositAmount - penalty;
             emit Finalized(participant1, participant2, false);
@@ -158,9 +164,9 @@ contract MeetupContract {
         balances[participant2] += depositAmount;
     }    
 
-    function _calculatePenalty() private view returns (uint256) {
-        if (block.timestamp <= meetingTime) return 0;
-        uint256 minutesLate = (block.timestamp - meetingTime) / 60;
+    function _calculatePenalty(uint256 arrivalTime) private view returns (uint256) {
+        if (arrivalTime <= meetingTime) return 0;
+        uint256 minutesLate = (arrivalTime - meetingTime) / 60;
         uint256 penalty = (depositAmount * minutesLate * penaltyRatePerMinute) / 10000;
         if (penalty > depositAmount) penalty = depositAmount;
         return penalty;
