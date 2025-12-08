@@ -128,6 +128,40 @@ contract EscrowContractEnhancedTest is Test {
         meetup.withdraw();
     }
 
+    function testConfirmMutualArrival_Success() public {
+        address[] memory parts = new address[](2);
+        parts[0] = participant1;
+        parts[1] = participant2;
+        meetup = new EscrowContract(parts, meetingTime, deposit, penaltyRate);
+
+        // both deposit
+        vm.prank(participant1); meetup.deposit{value: deposit}();
+        vm.prank(participant2); meetup.deposit{value: deposit}();
+
+        // Advance time to after meeting
+        vm.warp(meetingTime + 10 minutes);
+        uint256 ts = block.timestamp;
+
+        // Build mutual digests and signatures:
+        // participant2 signs mutual attestation for (a=participant1,b=participant2,ts) -> this is "sigOtherForCaller" when caller is participant1
+        bytes32 d_for_p1 = meetup.hashMutualAttestation(participant1, participant2, ts);
+        bytes memory sig2_for_p1 = _sign(PK2, d_for_p1);
+
+        // participant1 signs mutual attestation for (a=participant2,b=participant1,ts) -> this is "sigCallerForOther" when caller is participant1
+        bytes32 d_for_p2 = meetup.hashMutualAttestation(participant2, participant1, ts);
+        bytes memory sig1_for_p2 = _sign(PK1, d_for_p2);
+
+        // Caller (participant1) submits both signatures to confirm mutual arrival
+        vm.startPrank(participant1);
+        meetup.confirmMutualArrival(participant2, ts, sig2_for_p1, sig1_for_p2, "ipfs://mutual");
+        vm.stopPrank();
+
+        assertEq(meetup.arrivalTimes(participant1), ts, "Arrival time for p1 incorrect");
+        assertEq(meetup.arrivalTimes(participant2), ts, "Arrival time for p2 incorrect");
+        assertEq(meetup.arrivalProofIPFS(participant1), "ipfs://mutual");
+        assertEq(meetup.arrivalProofIPFS(participant2), "ipfs://mutual");
+    }
+
     // helper to avoid stack-too-deep in tests
     function _sign(uint256 pk, bytes32 digest) internal returns (bytes memory) {
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, digest);

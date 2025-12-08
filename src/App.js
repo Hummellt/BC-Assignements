@@ -1,23 +1,17 @@
 // src/App.js
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import "./App.css";
 import { create } from "kubo-rpc-client";
 import { ethers } from "ethers";
-import { Buffer } from "buffer";
-import exifr from "exifr";
+import QRCode from "qrcode";
+import QrScanner from "qr-scanner";
 
 import logo from "./meetup_confirmation.png";
 import { addresses, abis } from "./contracts";
 
-// Coordinates on-chain are stored scaled by COORD_SCALE (microdegrees)
-const COORD_SCALE = 1e6;
-const MAX_DISTANCE_METERS = 200; // max distance from meeting point (meters)
-
-// DEV fallback (example values)
-const EXPECTED_LOCATION = {
-  lat: 52.520008, // e.g., Berlin
-  lon: 13.404954,
-};
+// DEV fallback time (example)
+const DEV_ALLOW_FALLBACK = true;
+const DEV_FALLBACK_TIME = Math.floor(Date.now() / 1000) + 3600;
 
 const ZERO_ADDRESS =
   "0x0000000000000000000000000000000000000000000000000000000000000000";
@@ -34,27 +28,6 @@ const meetupContract = new ethers.Contract(
   defaultProvider
 );
 
-// ---- Helper functions for distance calculation ----
-function deg2rad(deg) {
-  return (deg * Math.PI) / 180;
-}
-
-function distanceMeters(lat1, lon1, lat2, lon2) {
-  const R = 6371000; // Erdradius in Meter
-  const dLat = deg2rad(lat2 - lat1);
-  const dLon = deg2rad(lon2 - lon1);
-
-  const a =
-    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-    Math.cos(deg2rad(lat1)) *
-      Math.cos(deg2rad(lat2)) *
-      Math.sin(dLon / 2) *
-      Math.sin(dLon / 2);
-
-  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-  return R * c;
-}
-
 // Read the IPFS hash currently stored in the contract for the connected user
 async function readCurrentUserIpfsHash() {
   const addr = await defaultProvider.getSigner().getAddress();
@@ -63,90 +36,24 @@ async function readCurrentUserIpfsHash() {
   return result;
 }
 
-// EXIF stripping: draw image into a <canvas> and export a new JPEG without EXIF
-async function stripExif(fileObj) {
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    const reader = new FileReader();
-
-    reader.onload = (ev) => {
-      img.onload = () => {
-        const canvas = document.createElement("canvas");
-        canvas.width = img.width;
-        canvas.height = img.height;
-        const ctx = canvas.getContext("2d");
-        ctx.drawImage(img, 0, 0);
-
-        canvas.toBlob(
-          (blob) => {
-            if (!blob) {
-              return reject(new Error("Could not create cleaned image blob"));
-            }
-            resolve(blob);
-          },
-          "image/jpeg",
-          0.95
-        );
-      };
-      img.onerror = reject;
-      img.src = ev.target.result;
-    };
-
-    reader.onerror = reject;
-    reader.readAsDataURL(fileObj);
-  });
-}
-
-// Small OpenStreetMap embed to show the meeting location
-function MeetingMap({ lat, lon, zoom = 15, width = 320, height = 220 }) {
-  if (lat == null || lon == null) return null;
-  const delta = 0.02;
-  const left = lon - delta;
-  const bottom = lat - delta;
-  const right = lon + delta;
-  const top = lat + delta;
-  const src = `https://www.openstreetmap.org/export/embed.html?bbox=${encodeURIComponent(
-    left
-  )}%2C${encodeURIComponent(bottom)}%2C${encodeURIComponent(right)}%2C${encodeURIComponent(
-    top
-  )}&layer=mapnik&marker=${encodeURIComponent(lat)}%2C${encodeURIComponent(lon)}`;
-
-  return (
-    <div style={{ marginTop: 8 }}>
-      <div
-        style={{
-          width: width,
-          height: height,
-          border: "1px solid #ccc",
-          borderRadius: 4,
-          overflow: "hidden",
-        }}
-      >
-        <iframe
-          title="meeting-location"
-          src={src}
-          style={{ border: 0, width: "100%", height: "100%" }}
-          loading="lazy"
-        />
-      </div>
-    </div>
-  );
-}
-
 function App() {
   const [ipfsHash, setIpfsHash] = useState("");
-  const [file, setFile] = useState(null); // bereinigtes Bild (ohne EXIF) als Buffer
-  const [locationOk, setLocationOk] = useState(false);
-  const [gpsInfo, setGpsInfo] = useState(null);
   const [status, setStatus] = useState("");
+  const [myQrDataUrl, setMyQrDataUrl] = useState("");
 
-  // meeting info from contract
-  const [meetingLocation, setMeetingLocation] = useState(null);
+  // meeting time only (location removed)
   const [meetingTimeHuman, setMeetingTimeHuman] = useState("");
 
-  const DEV_ALLOW_FALLBACK = true;
-  const DEV_FALLBACK_MEETING = EXPECTED_LOCATION;
-  const DEV_FALLBACK_TIME = Math.floor(Date.now() / 1000) + 3600;
+  const [scannerActive, setScannerActive] = useState(false);
+  const [scanResult, setScanResult] = useState("");
+  const videoRef = useRef(null);
+  const qrScannerRef = useRef(null);
+
+  // Mutual attestation builder state
+  const [otherAddressInput, setOtherAddressInput] = useState("");
+  const [pendingMutual, setPendingMutual] = useState(null); // { a,b,ts,sigCallerForOther }
+  const [mutualRequestQr, setMutualRequestQr] = useState(""); // dataURL showing request for other to scan
+  const [mutualSigQr, setMutualSigQr] = useState(""); // dataURL where other shows signature back to caller
 
   // ask wallet access
   useEffect(() => {
@@ -168,24 +75,12 @@ function App() {
     readFile();
   }, []);
 
-  // read meeting coordinates + meeting time from the contract once on load
+  // read meeting time from the contract once on load (location removed)
   useEffect(() => {
     async function loadMeetingInfo() {
       try {
-        const [latScaled, lonScaled, mt] = await Promise.all([
-          meetupContract.meetingLat(),
-          meetupContract.meetingLon(),
-          meetupContract.meetingTime(),
-        ]);
-        const latNum = Number(latScaled.toString());
-        const lonNum = Number(lonScaled.toString());
+        const mt = await meetupContract.meetingTime();
         const mtNum = Number(mt.toString());
-
-        if (latNum || lonNum) {
-          setMeetingLocation({ lat: latNum / COORD_SCALE, lon: lonNum / COORD_SCALE });
-        } else if (DEV_ALLOW_FALLBACK) {
-          setMeetingLocation(DEV_FALLBACK_MEETING);
-        }
 
         if (mtNum) {
           setMeetingTimeHuman(new Date(mtNum * 1000).toLocaleString());
@@ -195,7 +90,6 @@ function App() {
       } catch (e) {
         console.warn("loadMeetingInfo failed:", e?.message ?? e);
         if (DEV_ALLOW_FALLBACK) {
-          setMeetingLocation(DEV_FALLBACK_MEETING);
           setMeetingTimeHuman(new Date(DEV_FALLBACK_TIME * 1000).toLocaleString());
         }
       }
@@ -216,7 +110,7 @@ function App() {
 
     const contractWithSigner = meetupContract.connect(signer);
 
-    // --- NEW: diagnostics: contract address / expected address / network ---
+    // --- diagnostics: contract address / expected address / network ---
     try {
       const network = await defaultProvider.getNetwork();
       console.log("Provider network:", network);
@@ -272,11 +166,52 @@ function App() {
       throw new Error(msg);
     }
 
+    // Fetch attestation JSON from IPFS (public gateway fallback)
+    let attestation;
     try {
-      const tx = await contractWithSigner[method](hash);
+      // try local HTTP gateway first (if running a local node), else public gateway
+      const localUrl = `http://127.0.0.1:8080/ipfs/${hash}`;
+      let res = await fetch(localUrl).catch(() => null);
+      if (!res || !res.ok) {
+        res = await fetch(`https://ipfs.io/ipfs/${hash}`);
+      }
+      if (!res || !res.ok) throw new Error("Failed to fetch attestation JSON from IPFS");
+      attestation = await res.json();
+    } catch (e) {
+      console.error("Failed to fetch attestation JSON:", e);
+      throw new Error("Could not retrieve attestation JSON from IPFS. Ensure the attestation is uploaded and CID is correct.");
+    }
+
+    // Expect attestation to contain the two attesters and signatures
+    const { attester1, attester2, timestamp, signature1, signature2 } = attestation || {};
+    if (!attester1 || !attester2 || !timestamp || !signature1 || !signature2) {
+      console.error("Attestation missing required fields", attestation);
+      throw new Error("Attestation JSON missing required fields: attester1, attester2, timestamp, signature1, signature2.");
+    }
+
+    // Basic on-chain sanity checks (ensure signer is participant)
+    const p1Lower = participant1 ? String(participant1).toLowerCase() : null;
+    const p2Lower = participant2 ? String(participant2).toLowerCase() : null;
+    const s = signerAddr.toLowerCase();
+    if (p1Lower && p2Lower && s !== p1Lower && s !== p2Lower) {
+      throw new Error("Connected account is not a participant in this meetup contract.");
+    }
+
+    // call the strong-typed confirmArrival on-chain
+    try {
+      setStatus("Submitting attestation to contract…");
+      const tx = await contractWithSigner.confirmArrival(
+        attester1,
+        attester2,
+        Number(timestamp),
+        signature1,
+        signature2,
+        hash
+      );
       console.log("TX contract", tx.hash);
       await tx.wait();
       setIpfsHash(hash);
+      setStatus("On-chain confirmation complete.");
     } catch (err) {
       console.error("confirmArrival transaction failed:", err);
       const reason =
@@ -288,132 +223,78 @@ function App() {
     }
   }
 
-  // Datei-Upload + IPFS
-  const handleSubmit = async (e) => {
-    e.preventDefault();
+  async function confirmMutualOnChainFromIpfsHash(hash) {
+    const signer = defaultProvider.getSigner();
+    let signerAddr;
     try {
-      if (!file) {
-        alert("Please choose a valid photo first.");
-        return;
-      }
-      if (!locationOk) {
-        alert("Location is not verified. Please choose a photo with correct GPS.");
-        return;
-      }
-
-      setStatus("Uploading to IPFS…");
-
-      if (!client) {
-        // kubo-rpc-client: Browser-URL zur lokalen Kubo-Instanz
-        client = create({ url: "http://127.0.0.1:5001/api/v0" });
-      }
-
-      const result = await client.add(file);
-
-      // optional: im lokalen Node unter /<cid> erreichbar machen
-      try {
-        await client.files.cp(`/ipfs/${result.cid}`, `/${result.cid}`);
-      } catch (e) {
-        // ignore if files API not available
-      }
-
-      const cidStr = result.cid.toString();
-      console.log("IPFS CID:", cidStr);
-
-      setStatus("Writing CID to smart contract…");
-      await confirmArrivalOnChain(cidStr);
-
-      setStatus("Done ✔");
-    } catch (error) {
-      console.log(error);
-      setStatus(`Error: ${error.message}`);
+      signerAddr = await signer.getAddress();
+    } catch (e) {
+      throw new Error("Wallet not connected. Open your wallet and connect the account.");
     }
-  };
+    const contractWithSigner = meetupContract.connect(signer);
 
-  // choose file, check Location, EXIF strippen
-  const retrieveFile = async (e) => {
-    const fileObj = e.target.files[0];
-    if (!fileObj) return;
-
+    // fetch attestation JSON
+    let attestation;
     try {
-      setStatus("Reading EXIF data…");
-      setLocationOk(false);
-      setGpsInfo(null);
-
-      // robust exif parsing: try parse with helpers and fallback to full parse
-      let exif = null;
-      try {
-        // exifr can parse ArrayBuffer or File directly
-        exif = await exifr.parse(fileObj).catch(() => null);
-      } catch (err) {
-        exif = null;
+      const localUrl = `http://127.0.0.1:8080/ipfs/${hash}`;
+      let res = await fetch(localUrl).catch(() => null);
+      if (!res || !res.ok) {
+        res = await fetch(`https://ipfs.io/ipfs/${hash}`);
       }
+      if (!res || !res.ok) throw new Error("Failed to fetch attestation JSON from IPFS");
+      attestation = await res.json();
+    } catch (e) {
+      throw new Error("Could not retrieve attestation JSON from IPFS: " + (e?.message ?? e));
+    }
 
-      // normalize possible EXIF fields into decimal lat/lon
-      const toDecimal = (val, ref) => {
-        if (val == null) return null;
-        if (Array.isArray(val)) {
-          const [deg = 0, min = 0, sec = 0] = val;
-          let dec = deg + min / 60 + sec / 3600;
-          if (ref === "S" || ref === "W") dec = -dec;
-          return dec;
-        }
-        if (typeof val === "number") return val;
-        const n = Number(val);
-        return Number.isFinite(n) ? n : null;
-      };
+    // Expect mutual attestation shape: { type: "mutual", a, b, timestamp, sigAForB, sigBForA }
+    const { type, a, b, timestamp, sigAForB, sigBForA } = attestation || {};
+    if (type !== "mutual" || !a || !b || !timestamp || !sigAForB || !sigBForA) {
+      throw new Error("IPFS attestation is not a valid mutual attestation");
+    }
 
-      let lat = null;
-      let lon = null;
-      if (exif) {
-        const latRaw = exif.latitude ?? exif.gpsLatitude ?? exif.GPSLatitude;
-        const lonRaw = exif.longitude ?? exif.gpsLongitude ?? exif.GPSLongitude;
-        const latRef = exif.GPSLatitudeRef ?? exif.gpsLatitudeRef;
-        const lonRef = exif.GPSLongitudeRef ?? exif.gpsLongitudeRef;
-        lat = toDecimal(latRaw, latRef);
-        lon = toDecimal(lonRaw, lonRef);
-      }
+    // Determine caller role and order signatures accordingly:
+    const caller = signerAddr.toLowerCase();
+    const aLower = String(a).toLowerCase();
+    const bLower = String(b).toLowerCase();
 
-      if (lat == null || lon == null) {
-        alert("No GPS info found in the image EXIF. Upload aborted.");
-        setStatus("No GPS info in image.");
-        return;
-      }
+    if (caller !== aLower && caller !== bLower) {
+      throw new Error("Connected account is not part of the mutual attestation");
+    }
 
-      setGpsInfo({ lat, lon });
+    let other, sigOtherForCaller, sigCallerForOther;
+    if (caller === aLower) {
+      other = b;
+      sigOtherForCaller = sigBForA;
+      sigCallerForOther = sigAForB;
+    } else {
+      other = a;
+      sigOtherForCaller = sigAForB;
+      sigCallerForOther = sigBForA;
+    }
 
-      // choose target location: on-chain meetingLocation if available, otherwise fallback
-      const target = meetingLocation ?? EXPECTED_LOCATION;
-      const dist = distanceMeters(lat, lon, target.lat, target.lon);
-      console.log("Image coords", { lat, lon }, "target", target, "distance m", dist);
-
-      if (dist > MAX_DISTANCE_METERS) {
-        alert(
-          `Image is too far from meetup location (~${Math.round(
-            dist
-          )} m). Max allowed: ${MAX_DISTANCE_METERS} m.`
-        );
-        setStatus("Location check failed.");
-        setLocationOk(false);
-        return;
-      }
-
-      setLocationOk(true);
-      setStatus(`Location OK (~${Math.round(dist)} m). Stripping EXIF…`);
-
-      // EXIF stripping and convert to Buffer 
-      const cleanedBlob = await stripExif(fileObj);
-      const cleanedArrayBuffer = await cleanedBlob.arrayBuffer();
-      const cleanedBuffer = Buffer.from(cleanedArrayBuffer);
-      setFile(cleanedBuffer);
-
-      setStatus("Ready to upload cleaned image to IPFS.");
+    // call contract
+    try {
+      setStatus("Submitting mutual attestation to contract…");
+      const tx = await contractWithSigner.confirmMutualArrival(
+        other,
+        Number(timestamp),
+        sigOtherForCaller,
+        sigCallerForOther,
+        hash
+      );
+      await tx.wait();
+      setIpfsHash(hash);
+      setStatus("Mutual on-chain confirmation complete.");
     } catch (err) {
-      console.log(err);
-      setStatus(`Error while reading EXIF: ${err.message ?? err}`);
-      setLocationOk(false);
+      const reason =
+        err?.error?.message ||
+        err?.data?.message ||
+        err?.message ||
+        (typeof err === "string" ? err : JSON.stringify(err));
+      throw new Error("Transaction failed: " + reason);
     }
-  };
+  }
 
   async function runDiagnostics() {
     try {
@@ -445,24 +326,279 @@ function App() {
     }
   }
 
+  // Minimal QR generator: ephemeral payload + signature -> QR image
+  async function generateMyQr() {
+    try {
+      const signer = defaultProvider.getSigner();
+      const addr = await signer.getAddress();
+      const ts = Math.floor(Date.now() / 1000);
+      const payload = { address: addr, contract: addresses.meetup, ts };
+      const sig = await signer.signMessage(JSON.stringify(payload));
+      const qrContent = JSON.stringify({ payload, sig });
+      const dataUrl = await QRCode.toDataURL(qrContent, { margin: 2, scale: 6 });
+      setMyQrDataUrl(dataUrl);
+    } catch (e) {
+      console.error("QR generation failed", e);
+      setStatus("QR generation failed: " + (e?.message ?? e));
+    }
+  }
+
+  // Prepare a mutual-request QR (caller generates and signs their own piece)
+  async function prepareMutualRequest(otherAddrInputVal) {
+    try {
+      setStatus("Preparing mutual request…");
+      const signer = defaultProvider.getSigner();
+      const caller = await signer.getAddress();
+      const a = caller;
+      const b = otherAddrInputVal;
+      const ts = Math.floor(Date.now() / 1000);
+
+      // compute digest where arriver = other (this caller's signature for other)
+      const digestForCallerSigning = await meetupContract.hashMutualAttestation(b, a, ts);
+      const sigCallerForOther = await signer.signMessage(ethers.utils.arrayify(digestForCallerSigning));
+
+      const requestPayload = {
+        type: "mutual-request",
+        a,
+        b,
+        ts,
+        sigCallerForOther,
+      };
+
+      const dataUrl = await QRCode.toDataURL(JSON.stringify(requestPayload), { margin: 2, scale: 6 });
+      setMutualRequestQr(dataUrl);
+      setPendingMutual({ a, b, ts, sigCallerForOther });
+      setStatus("Mutual request prepared. Show this QR to the other participant so they can sign.");
+    } catch (e) {
+      console.error("prepareMutualRequest failed", e);
+      setStatus("Failed preparing mutual request: " + (e?.message ?? e));
+    }
+  }
+
+  // QR scanner: expects scanned content to be the attestation JSON (attester1, attester2, timestamp, signature1, signature2)
+  async function processScannedContent(content) {
+    setScanResult(content);
+    setStatus("Processing scanned QR…");
+
+    let parsed;
+    try {
+      parsed = JSON.parse(content);
+    } catch (e) {
+      // not JSON, treat as possible raw CID
+      parsed = null;
+    }
+
+    try {
+      if (!client) {
+        client = create({ url: "http://127.0.0.1:5001/api/v0" });
+      }
+
+      // Handle mutual-request and mutual-sig flows (unchanged)
+      if (parsed && parsed.type === "mutual-request") {
+        const signer = defaultProvider.getSigner();
+        const me = (await signer.getAddress()).toLowerCase();
+        const aLower = String(parsed.a).toLowerCase();
+        const bLower = String(parsed.b).toLowerCase();
+
+        if (me === bLower) {
+          setStatus("Mutual request received. Signing…");
+          const digestCaller = await meetupContract.hashMutualAttestation(parsed.a, parsed.b, Number(parsed.ts));
+          const sigOtherForCaller = await signer.signMessage(ethers.utils.arrayify(digestCaller));
+
+          const sigPayload = {
+            type: "mutual-sig",
+            a: parsed.a,
+            b: parsed.b,
+            ts: parsed.ts,
+            sigOtherForCaller,
+          };
+
+          const dataUrl = await QRCode.toDataURL(JSON.stringify(sigPayload), { margin: 2, scale: 6 });
+          setMutualSigQr(dataUrl);
+          setStatus("Signed mutual request. Show this QR to the original requester to finish.");
+          return;
+        } else {
+          setStatus("Mutual request scanned but you are not the intended signer.");
+          return;
+        }
+      }
+
+      if (parsed && parsed.type === "mutual-sig") {
+        const signer = defaultProvider.getSigner();
+        const me = (await signer.getAddress()).toLowerCase();
+        const aLower = String(parsed.a).toLowerCase();
+        const bLower = String(parsed.b).toLowerCase();
+
+        if (me === aLower) {
+          if (!pendingMutual || pendingMutual.a.toLowerCase() !== aLower || pendingMutual.b.toLowerCase() !== bLower || Number(pendingMutual.ts) !== Number(parsed.ts)) {
+            setStatus("No matching pending mutual request found. Please prepare a mutual request first.");
+            return;
+          }
+
+          const attestation = {
+            type: "mutual",
+            a: pendingMutual.a,
+            b: pendingMutual.b,
+            timestamp: pendingMutual.ts,
+            sigAForB: pendingMutual.sigCallerForOther,
+            sigBForA: parsed.sigOtherForCaller,
+          };
+
+          const blob = new Blob([JSON.stringify(attestation)], { type: "application/json" });
+          const res = await client.add(blob);
+          const cidStr = res.cid.toString();
+          setStatus("Uploaded mutual attestation to IPFS: " + cidStr);
+          await confirmMutualOnChainFromIpfsHash(cidStr);
+          setStatus("Mutual arrival confirmed on-chain via scanned attestation.");
+          setPendingMutual(null);
+          setMutualRequestQr("");
+          setMutualSigQr("");
+          return;
+        } else {
+          setStatus("Mutual signature scanned. If you are the original requester, prepare the mutual request first and then scan this signature.");
+          return;
+        }
+      }
+
+      let cidStr;
+      if (parsed && typeof parsed === "object" && parsed.type === "mutual") {
+        const blob = new Blob([JSON.stringify(parsed)], { type: "application/json" });
+        const res = await client.add(blob);
+        cidStr = res.cid.toString();
+        setStatus("Uploaded mutual attestation to IPFS: " + cidStr);
+        await confirmMutualOnChainFromIpfsHash(cidStr);
+        setStatus("Mutual arrival confirmed on-chain via scanned attestation.");
+        return;
+      }
+
+      if (parsed && typeof parsed === "object") {
+        const blob = new Blob([JSON.stringify(parsed)], { type: "application/json" });
+        const res = await client.add(blob);
+        cidStr = res.cid.toString();
+      } else {
+        cidStr = content.trim();
+      }
+
+      setStatus("Uploading attestation / calling contract...");
+      await confirmArrivalOnChain(cidStr);
+      setStatus("Arrival confirmed on-chain via scanned attestation.");
+    } catch (err) {
+      console.error("Failed processing scanned QR:", err);
+      setStatus("Error: " + (err?.message ?? String(err)));
+    }
+  }
+
+  function startScanner() {
+    if (!videoRef.current) return;
+    setStatus("Starting camera for QR scanning...");
+    qrScannerRef.current = new QrScanner(
+      videoRef.current,
+      (result) => {
+        stopScanner();
+        processScannedContent(result?.data ?? result);
+      },
+      {
+        highlightScanRegion: true,
+        returnDetailedScanResult: false,
+      }
+    );
+    qrScannerRef.current.start().then(() => {
+      setScannerActive(true);
+      setStatus("Scanner active. Point camera at QR.");
+    }).catch((e) => {
+      console.error("Camera start failed", e);
+      setStatus("Could not start camera: " + (e?.message ?? e));
+    });
+  }
+
+  function stopScanner() {
+    if (qrScannerRef.current) {
+      qrScannerRef.current.stop();
+      qrScannerRef.current.destroy();
+      qrScannerRef.current = null;
+    }
+    setScannerActive(false);
+    setStatus("Scanner stopped.");
+  }
+
+  useEffect(() => {
+    return () => {
+      if (qrScannerRef.current) {
+        qrScannerRef.current.destroy();
+        qrScannerRef.current = null;
+      }
+    };
+  }, []);
+
   return (
     <div className="App">
       <header className="App-header">
+        {/* Logo restored */}
+        <div style={{ marginBottom: 12 }}>
+          <img src={logo} alt="Meetup logo" style={{ height: 64, marginBottom: 8 }} />
+        </div>
 
-        {/* Meeting box: map, coordinates and time */}
+        {/* QR generation */}
+        <div style={{ marginBottom: 12 }}>
+          <button onClick={generateMyQr} className="btn" style={{ marginRight: 8 }}>
+            Generate my QR
+          </button>
+          <span style={{ fontSize: 12, color: "#666" }}>Create an ephemeral signed QR for peers to scan.</span>
+          {myQrDataUrl && (
+            <div style={{ marginTop: 8 }}>
+              <img src={myQrDataUrl} alt="My QR" style={{ maxWidth: 240, border: "1px solid #ddd", borderRadius: 6 }} />
+            </div>
+          )}
+        </div>
+
+        {/* Mutual attestation builder */}
+        <div style={{ width: 560, maxWidth: "100%", background: "#fff", padding: 12, borderRadius: 8, marginBottom: 12 }}>
+          <h3 style={{ margin: "0 0 8px 0", color: "#333" }}>Mutual Attestation</h3>
+          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+            <input
+              placeholder="Other participant address (0x...)"
+              value={otherAddressInput}
+              onChange={(e) => setOtherAddressInput(e.target.value)}
+              style={{ padding: 8, flex: "1 1 320px", borderRadius: 4, border: "1px solid #ccc" }}
+            />
+            <button
+              className="btn"
+              onClick={() => prepareMutualRequest(otherAddressInput)}
+            >
+              Prepare mutual request (sign & show QR)
+            </button>
+          </div>
+          <div style={{ marginTop: 10 }}>
+            <div style={{ fontSize: 13, color: "#333" }}>Flow (caller & other):</div>
+            <ol style={{ fontSize: 13 }}>
+              <li>Caller prepares mutual request and shows the generated QR to the other participant.</li>
+              <li>Other scans the request QR; the app signs and shows a response QR (mutual-sig).</li>
+              <li>Caller scans the response QR; the app uploads the attestation to IPFS and calls confirmMutualArrival on-chain.</li>
+            </ol>
+            <div style={{ marginTop: 8 }}>
+              {mutualRequestQr && (
+                <div>
+                  <div style={{ fontSize: 12, color: "#666" }}>Mutual request QR (show to other):</div>
+                  <img src={mutualRequestQr} alt="Mutual request QR" style={{ maxWidth: 240, border: "1px solid #ddd", borderRadius: 6 }} />
+                </div>
+              )}
+              {mutualSigQr && (
+                <div style={{ marginTop: 8 }}>
+                  <div style={{ fontSize: 12, color: "#666" }}>Mutual signature QR (show back to caller):</div>
+                  <img src={mutualSigQr} alt="Mutual signature QR" style={{ maxWidth: 240, border: "1px solid #ddd", borderRadius: 6 }} />
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {/* Meeting: only show time (location removed) */}
         <div style={{ width: 560, maxWidth: "100%", background: "#fff", padding: 12, borderRadius: 8, marginBottom: 12 }}>
           <h3 style={{ margin: "0 0 8px 0", color: "#333" }}>Meeting</h3>
-          {meetingLocation ? (
+          {meetingTimeHuman ? (
             <div style={{ display: "flex", gap: 12, alignItems: "flex-start", flexWrap: "wrap" }}>
-              <div style={{ flex: "0 0 240px", minWidth: 200 }}>
-                <MeetingMap lat={meetingLocation.lat} lon={meetingLocation.lon} width={240} height={140} />
-              </div>
-              <div style={{ flex: "1 1 260px", minWidth: 180 }}>
-                <div style={{ fontSize: 13, color: "#333" }}>Coordinates</div>
-                <div style={{ fontSize: 14, marginTop: 6, color: "#333" }}>
-                  {meetingLocation.lat.toFixed(6)}, {meetingLocation.lon.toFixed(6)}
-                </div>
-                <div style={{ marginTop: 10, fontSize: 13, color: "#333" }}>Time</div>
+              <div style={{ flex: "1 1 100%", minWidth: 180 }}>
+                <div style={{ fontSize: 13, color: "#333" }}>Time</div>
                 <div style={{ fontSize: 14, marginTop: 6, color: "#333" }}>{meetingTimeHuman}</div>
               </div>
             </div>
@@ -472,28 +608,27 @@ function App() {
         </div>
 
         <p>
-          Upload a photo as arrival evidence. GPS is checked against the meetup
-          location, EXIF is stripped, and the cleaned image is stored on IPFS.
+          Arrival is now handled via QR-attestations. Scan a QR containing the attestation JSON or an IPFS CID pointing to the attestation.
         </p>
 
-        <form className="form" onSubmit={handleSubmit}>
-          <input type="file" name="data" accept="image/*" onChange={retrieveFile} />
-          <button type="submit" className="btn">
-            Upload & Confirm Arrival
+        <div style={{ marginBottom: 12 }}>
+          <button onClick={startScanner} className="btn" disabled={scannerActive} style={{ marginRight: 8 }}>
+            Start QR Scanner
+          </button>
+          <button onClick={stopScanner} className="btn" disabled={!scannerActive}>
+            Stop Scanner
           </button>
           <button type="button" className="btn" onClick={runDiagnostics} style={{ marginLeft: 8 }}>
             Run Diagnostics
           </button>
-        </form>
+        </div>
+
+        <div>
+          <video ref={videoRef} style={{ width: 320, height: 240, border: "1px solid #ccc", borderRadius: 6 }} />
+        </div>
 
         {status && <p>{status}</p>}
-
-        {gpsInfo && (
-          <p>
-            Detected GPS: lat {gpsInfo.lat.toFixed(5)}, lon {gpsInfo.lon.toFixed(5)}
-          </p>
-        )}
-
+        {scanResult && <p>Last scan: {scanResult}</p>}
         {ipfsHash && <p>Last stored IPFS hash on-chain: {ipfsHash}</p>}
       </header>
     </div>

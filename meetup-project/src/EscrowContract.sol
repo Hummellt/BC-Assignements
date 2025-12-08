@@ -19,6 +19,9 @@ contract EscrowContract is EIP712 {
     // Stores the first valid arrival time for each participant
     mapping(address => uint256) public arrivalTimes;
 
+    // Stores IPFS proof CID for each participant
+    mapping(address => string) public arrivalProofIPFS;
+
     // Secure withdrawal pattern state
     mapping(address => uint256) public balances;
 
@@ -32,6 +35,11 @@ contract EscrowContract is EIP712 {
     // EIP-712 typehash for Attestation
     bytes32 private constant ATTESTATION_TYPEHASH = keccak256(
         "Attestation(address arriver,address attester1,address attester2,uint256 timestamp)"
+    );
+
+    // EIP-712 typehash for MutualAttestation (two-way, used when only two participants mutually attest)
+    bytes32 private constant MUTUAL_TYPEHASH = keccak256(
+        "MutualAttestation(address a,address b,uint256 timestamp)"
     );
 
     constructor(
@@ -118,9 +126,63 @@ contract EscrowContract is EIP712 {
             contractState = State.InProgress;
         }
 
+        arrivalProofIPFS[msg.sender] = ipfsHash;
         emit ArrivalProofSubmitted(msg.sender, ipfsHash);
     }
 
+    // mutual arrival confirmation for two participants using mutual attestations.
+    // Allows one submitter to provide both signatures so A and B (two people) can attest each other
+    // in a single on-chain call.
+    function confirmMutualArrival(
+        address other,
+        uint256 timestamp,
+        bytes calldata signatureOtherForCaller,
+        bytes calldata signatureCallerForOther,
+        string calldata ipfsHash
+    ) external {
+        require(isParticipant[msg.sender], "Not a participant");
+        require(isParticipant[other], "Other must be a participant");
+        require(msg.sender != other, "Other cannot be self");
+        require(contractState != State.Finalized, "Already finalized");
+        require(bytes(ipfsHash).length > 0, "IPFS hash required");
+        require(timestamp >= meetingTime, "Attestation cannot be from before the meeting time");
+        require(signatureOtherForCaller.length == 65 && signatureCallerForOther.length == 65, "Invalid signature length");
+
+        // Recover 'other' signing the digest where arriver = msg.sender
+        bytes32 digestCaller = hashMutualAttestation(msg.sender, other, timestamp);
+        address recovered = ECDSA.recover(digestCaller, signatureOtherForCaller);
+        if (recovered != other) {
+            recovered = ECDSA.recover(keccak256(abi.encodePacked("\x19Ethereum Signed Message:\n32", digestCaller)), signatureOtherForCaller);
+        }
+        require(recovered == other, "Other's signature invalid for caller");
+
+        // Recover 'msg.sender' signing the digest where arriver = other
+        bytes32 digestOther = hashMutualAttestation(other, msg.sender, timestamp);
+        recovered = ECDSA.recover(digestOther, signatureCallerForOther);
+        if (recovered != msg.sender) {
+            recovered = ECDSA.recover(keccak256(abi.encodePacked("\x19Ethereum Signed Message:\n32", digestOther)), signatureCallerForOther);
+        }
+        require(recovered == msg.sender, "Caller signature invalid for other");
+
+        // Mark both arrivals (if not already set)
+        if (arrivalTimes[msg.sender] == 0) {
+            arrivalTimes[msg.sender] = timestamp;
+            emit Arrived(msg.sender, timestamp);
+            arrivalProofIPFS[msg.sender] = ipfsHash;
+            emit ArrivalProofSubmitted(msg.sender, ipfsHash);
+        }
+
+        if (arrivalTimes[other] == 0) {
+            arrivalTimes[other] = timestamp;
+            emit Arrived(other, timestamp);
+            arrivalProofIPFS[other] = ipfsHash;
+            emit ArrivalProofSubmitted(other, ipfsHash);
+        }
+
+        if (contractState == State.Created) {
+            contractState = State.InProgress;
+        }
+    }
 
     // @dev Allows cancellation before any arrivals, refunding all participants.
     function cancelBeforeArrivals() external {
@@ -197,6 +259,21 @@ contract EscrowContract is EIP712 {
             arriver,
             attester1,
             attester2,
+            timestamp
+        ));
+        return _hashTypedDataV4(structHash);
+    }
+
+    // hash for mutual two-way attestation
+    function hashMutualAttestation(
+        address a,
+        address b,
+        uint256 timestamp
+    ) public view returns (bytes32) {
+        bytes32 structHash = keccak256(abi.encode(
+            MUTUAL_TYPEHASH,
+            a,
+            b,
             timestamp
         ));
         return _hashTypedDataV4(structHash);
