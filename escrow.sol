@@ -2,22 +2,17 @@
 pragma solidity =0.8.20;
 
 import "@openzeppelin/contracts/utils/Address.sol";
-
 contract MeetupContract {
-    address payable public participant1;  
-    address payable public participant2;  
+    enum State { Created, InProgress, Finalized }
+
+    // state Vars
+    address[] public participants;
+    mapping(address => bool) public isParticipant;
+
     uint256 public meetingTime;
-    // meeting coordinates stored as signed integers scaled by 1e6 (microdegrees)
-    int256 public meetingLat;
-    int256 public meetingLon;
     uint256 public depositAmount;
-    bool public arrived1;
-    bool public arrived2;
-    bool public finalized;
     uint256 public penaltyRatePerMinute; // e.g., 200 = 2% per minute
-    uint256 public cancellationTimeout = 5 minutes;
-    bool public cancelRequest1;
-    bool public cancelRequest2;
+    State public contractState;
 
     // stores IPFS hashes with the arrival proofs
     mapping(address => string) public arrivalProofIPFS;
@@ -28,40 +23,41 @@ contract MeetupContract {
     // Store individual arrival times to fix penalty calculation
     mapping(address => uint256) public arrivalTimes;
 
-    // Events
     event Deposited(address indexed participant, uint256 amount);
     event Arrived(address indexed participant, uint256 arrivalTime);
     event ArrivalProofSubmitted(address indexed participant, string ipfsHash);
     event Cancelled(address indexed initiator);
-    event Finalized(address indexed participant1, address indexed participant2, bool success);
+    event Finalized(uint256 finalizationTime);
+    event Withdrawn(address indexed participant, uint256 amount);
 
     constructor(
-        address payable _participant1,
-        address payable _participant2,
+        address[] memory _participants,
         uint256 _meetingTime,
-        int256 _meetingLat,
-        int256 _meetingLon,
         uint256 _depositAmount,
         uint256 _penaltyRatePerMinute
     ) {
         require(_meetingTime > block.timestamp, "Meeting time must be in the future");
-        require(_participant1 != _participant2, "Participants must be different");
+        require(_participants.length >= 2, "Must have at least 2 participants");
         require(_depositAmount > 0, "Deposit must be > 0");
 
-        participant1 = _participant1;  
-        participant2 = _participant2; 
+        for (uint i = 0; i < _participants.length; i++) {
+            address p = _participants[i];
+            require(p != address(0), "Invalid participant address");
+            require(!isParticipant[p], "Duplicate participant"); // Ensure no duplicate participants
+            isParticipant[p] = true;
+        }
+        participants = _participants;
+
         meetingTime = _meetingTime;
-        // store scaled coordinates
-        meetingLat = _meetingLat;
-        meetingLon = _meetingLon;
         depositAmount = _depositAmount;
         penaltyRatePerMinute = _penaltyRatePerMinute;
+        contractState = State.Created;
     }
 
     function deposit() external payable {
-        require(msg.sender == participant1 || msg.sender == participant2, "Not a participant");
+        require(isParticipant[msg.sender], "Not a participant");
         require(msg.value == depositAmount, "Incorrect deposit amount");
-        require(!finalized, "Already finalized");
+        require(contractState == State.Created, "Deposits are closed");
 
         balances[msg.sender] += msg.value;
         emit Deposited(msg.sender, msg.value);
@@ -75,9 +71,9 @@ contract MeetupContract {
      * The photo is uploaded off-chain to IPFS; the contract only stores the hash.
      */
     function confirmArrival(string calldata ipfsHash) external {
-        require(msg.sender == participant1 || msg.sender == participant2, "Not a participant");
-        require(block.timestamp >= meetingTime, "Meeting time not reached");
-        require(!finalized, "Already finalized");
+        require(isParticipant[msg.sender], "Not a participant");
+        require(block.timestamp >= meetingTime, "Meeting time not reached"); // needs to be updated
+        require(contractState != State.Finalized, "Already finalized");
         require(bytes(ipfsHash).length > 0, "IPFS hash required");
 
         // store IPFS hash as proof for this participant
@@ -87,81 +83,52 @@ contract MeetupContract {
         uint256 arrival = block.timestamp;
         arrivalTimes[msg.sender] = arrival;
 
-        if (msg.sender == participant1) {
-            arrived1 = true;
-        } else {
-            arrived2 = true;
+        // Transition state if this is the first arrival confirmation
+        if (contractState == State.Created) {
+            contractState = State.InProgress;
         }
         emit Arrived(msg.sender, arrival);
     }
 
     // Cancellation function (both must agree, within 5 minutes)
-    //@dev not yet working
     function cancel() external {
-        require(!finalized, "Already finalized");
-        require(block.timestamp < meetingTime + cancellationTimeout, "Cancellation window expired");
-        require(msg.sender == participant1 || msg.sender == participant2, "Not a participant");
+        require(contractState != State.Finalized, "Already finalized");
+        require(block.timestamp < meetingTime + 5 minutes, "Cancellation window expired"); // Hardcoded 5 minutes for now
+        require(isParticipant[msg.sender], "Not a participant");
 
-        if (msg.sender == participant1) cancelRequest1 = true;
-        else cancelRequest2 = true;
+        // cancellation logic needs overhaul for multiple participants.
+        // This is a temporary placeholder.
+        bool anyArrivals = false;
+        for (uint i = 0; i < participants.length; i++) {
+            if (arrivalTimes[participants[i]] != 0) {
+                anyArrivals = true;
+                break;
+            }
+        }
+        require(!anyArrivals, "Cannot cancel after any participant has arrived");
 
-        require(cancelRequest1 && cancelRequest2, "Both participants must agree");
-
-        finalized = true;
+        contractState = State.Finalized; // Mark as finalized to prevent further actions
         _refundBoth();
         emit Cancelled(msg.sender);
     }
 
     // Mutual confirmation logic
     function confirmOtherArrival() external {
-        require(!finalized, "Already finalized");
-        require(
-            (msg.sender == participant1 && arrived2) ||
-            (msg.sender == participant2 && arrived1),
-            "Other participant not confirmed yet"
-        );
-
-        finalized = true;
+        // This function is specific to the two-participant model and will be removed.
+        revert("confirmOtherArrival is deprecated in this version");
         _finalize();
     }
 
     // Finalization logic
     function _finalize() private {
-        bool bothArrived = arrived1 && arrived2;
-
-        if (bothArrived) {
-            uint256 penalty1 = _calculatePenalty(arrivalTimes[participant1]);
-            uint256 penalty2 = _calculatePenalty(arrivalTimes[participant2]);
-
-            if (penalty1 == 0 && penalty2 == 0) {
-                _refundBoth();
-            } else if (penalty1 > penalty2) {
-                balances[participant2] += penalty1;
-                balances[participant1] += depositAmount - penalty1;
-            } else if (penalty2 > penalty1) {
-                balances[participant1] += penalty2;
-                balances[participant2] += depositAmount - penalty2;
-            } else {
-                // Both equally late → no penalty
-                _refundBoth();
-            }
-
-            emit Finalized(participant1, participant2, true);
-        } else {
-            // Only one participant arrived
-            address lateParticipant = !arrived1 ? participant1 : participant2;
-            address onTimeParticipant = arrived1 ? participant1 : participant2;
-            uint256 penalty = _calculatePenalty(arrivalTimes[onTimeParticipant]);
-
-            balances[onTimeParticipant] += penalty;
-            balances[lateParticipant] += depositAmount - penalty;
-            emit Finalized(participant1, participant2, false);
-        }
+        // This function will be completely rewritten for the multi-participant quorum logic.
+        // For now it revert to indicate it's deprecated.
+        revert("_finalize logic is deprecated in this version");
     }
 
     function _refundBoth() private {
-        balances[participant1] += depositAmount;
-        balances[participant2] += depositAmount;
+        // two-participant model and will be removed.
+        revert("_refundBoth is deprecated in this version");
     }    
 
     function _calculatePenalty(uint256 arrivalTime) private view returns (uint256) {
@@ -177,7 +144,7 @@ contract MeetupContract {
      * This is the secure "pull-over-push" pattern.
      */
     function withdraw() external {
-        require(finalized, "Contract not finalized");
+        require(contractState == State.Finalized, "Contract not finalized");
         uint256 amount = balances[msg.sender];
         require(amount > 0, "No balance to withdraw");
 
