@@ -64,69 +64,56 @@ contract EscrowContract is EIP712 {
     }
 
     //  Arrival confirmation
-    function confirmArrival(string calldata ipfsHash) external {
+    function confirmArrival(
+        address attester1,
+        address attester2,
+        uint256 timestamp,
+        bytes calldata signature1,
+        bytes calldata signature2,
+        string calldata ipfsHash
+    ) external {
         require(isParticipant[msg.sender], "Not a participant");
-        require(block.timestamp >= meetingTime, "Meeting time not reached"); // needs to be updated
+        require(isParticipant[attester1] && isParticipant[attester2], "Attesters must be participants");
         require(contractState != State.Finalized, "Already finalized");
-        require(bytes(ipfsHash).length > 0, "IPFS hash required");
+        require(timestamp >= meetingTime, "Attestation cannot be from before the meeting time");
 
-        // store IPFS hash as proof for this participant
-        arrivalProofIPFS[msg.sender] = ipfsHash;
-        emit ArrivalProofSubmitted(msg.sender, ipfsHash);
+        // Verify the signatures
+        bytes32 structHash = _hashTypedDataV4(keccak256(abi.encode(
+            keccak256("Attestation(address attester1,address attester2,uint256 timestamp)"),
+            attester1,
+            attester2,
+            timestamp
+        )));
 
-        uint256 arrival = block.timestamp;
-        arrivalTimes[msg.sender] = arrival;
+        address recovered1 = ECDSA.recover(structHash, signature1);
+        address recovered2 = ECDSA.recover(structHash, signature2);
+
+        require(
+            (recovered1 == attester1 && recovered2 == attester2) || (recovered1 == attester2 && recovered2 == attester1),
+            "Invalid signatures"
+        );
+
+        // Record arrival time for both participants in the attestation, if not already recorded.
+        // This ensures the first valid proof sets their arrival time.
+        if (arrivalTimes[attester1] == 0) {
+            arrivalTimes[attester1] = timestamp;
+            emit Arrived(attester1, timestamp);
+        }
+        if (arrivalTimes[attester2] == 0) {
+            arrivalTimes[attester2] = timestamp;
+            emit Arrived(attester2, timestamp);
+        }
 
         // Transition state if this is the first arrival confirmation
         if (contractState == State.Created) {
             contractState = State.InProgress;
         }
-        emit Arrived(msg.sender, arrival);
+
+        emit ArrivalProofSubmitted(msg.sender, ipfsHash);
     }
-
-    // Cancellation function (both must agree, within 5 minutes)
-    function cancel() external {
-        require(contractState != State.Finalized, "Already finalized");
-        require(block.timestamp < meetingTime + 5 minutes, "Cancellation window expired"); // Hardcoded 5 minutes for now
-        require(isParticipant[msg.sender], "Not a participant");
-
-        // cancellation logic needs overhaul for multiple participants.
-        // This is a temporary placeholder.
-        bool anyArrivals = false;
-        for (uint i = 0; i < participants.length; i++) {
-            if (arrivalTimes[participants[i]] != 0) {
-                anyArrivals = true;
-                break;
-            }
-        }
-        require(!anyArrivals, "Cannot cancel after any participant has arrived");
-
-        contractState = State.Finalized; // Mark as finalized to prevent further actions
-        _refundBoth();
-        emit Cancelled(msg.sender);
-    }
-
-    // Mutual confirmation logic
-    function confirmOtherArrival() external {
-        // This function is specific to the two-participant model and will be removed.
-        revert("confirmOtherArrival is deprecated in this version");
-        _finalize();
-    }
-
-    // Finalization logic
-    function _finalize() private {
-        // This function will be completely rewritten for the multi-participant quorum logic.
-        // For now it revert to indicate it's deprecated.
-        revert("_finalize logic is deprecated in this version");
-    }
-
-    function _refundBoth() private {
-        // two-participant model and will be removed.
-        revert("_refundBoth is deprecated in this version");
-    }    
 
     function _calculatePenalty(uint256 arrivalTime) private view returns (uint256) {
-        if (arrivalTime <= meetingTime) return 0;
+        if (arrivalTime == 0 || arrivalTime <= meetingTime) return 0; // No arrival or on time
         uint256 minutesLate = (arrivalTime - meetingTime) / 60;
         uint256 penalty = (depositAmount * minutesLate * penaltyRatePerMinute) / 10000;
         if (penalty > depositAmount) penalty = depositAmount;
@@ -152,6 +139,4 @@ contract EscrowContract is EIP712 {
         (bool success, ) = msg.sender.call{value: amount}("");
         require(success, "Transfer failed");
     }
-
-    receive() external payable {}
 }
