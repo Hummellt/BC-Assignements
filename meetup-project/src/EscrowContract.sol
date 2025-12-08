@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: MIT
 pragma solidity =0.8.20;
 
-contract EscrowContract {
+import "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
+
+contract EscrowContract is EIP712 {
     enum State { Created, InProgress, Finalized }
 
     // state Vars
@@ -13,19 +15,16 @@ contract EscrowContract {
     uint256 public penaltyRatePerMinute; // e.g., 200 = 2% per minute
     State public contractState;
 
-    // stores IPFS hashes with the arrival proofs
-    mapping(address => string) public arrivalProofIPFS;
+    // Stores the first valid arrival time for each participant
+    mapping(address => uint256) public arrivalTimes;
 
     // Secure withdrawal pattern state
     mapping(address => uint256) public balances;
 
-    // Store individual arrival times to fix penalty calculation
-    mapping(address => uint256) public arrivalTimes;
-
     event Deposited(address indexed participant, uint256 amount);
     event Arrived(address indexed participant, uint256 arrivalTime);
     event ArrivalProofSubmitted(address indexed participant, string ipfsHash);
-    event Cancelled(address indexed initiator);
+    event ContractCancelled();
     event Finalized(uint256 finalizationTime);
     event Withdrawn(address indexed participant, uint256 amount);
 
@@ -36,6 +35,8 @@ contract EscrowContract {
         uint256 _penaltyRatePerMinute
     ) {
         require(_meetingTime > block.timestamp, "Meeting time must be in the future");
+        // EIP712 constructor
+        _initializeEIP712("MeetupAttestation", "1");
         require(_participants.length >= 2, "Must have at least 2 participants");
         require(_depositAmount > 0, "Deposit must be > 0");
 
@@ -62,13 +63,7 @@ contract EscrowContract {
         emit Deposited(msg.sender, msg.value);
     }
 
-    // -------------------------
     //  Arrival confirmation
-    // -------------------------
-    /**
-     * @dev Participant confirms arrival and attaches an IPFS CID of a photo.
-     * The photo is uploaded off-chain to IPFS; the contract only stores the hash.
-     */
     function confirmArrival(string calldata ipfsHash) external {
         require(isParticipant[msg.sender], "Not a participant");
         require(block.timestamp >= meetingTime, "Meeting time not reached"); // needs to be updated
@@ -136,6 +131,11 @@ contract EscrowContract {
         uint256 penalty = (depositAmount * minutesLate * penaltyRatePerMinute) / 10000;
         if (penalty > depositAmount) penalty = depositAmount;
         return penalty;
+    }
+
+    // @dev EIP-712 hash for the attestation structure.
+    function _hashTypedDataV4(bytes32 structHash) internal view virtual override returns (bytes32) {
+        return EIP712._hashTypedDataV4(structHash);
     }
 
     /**
