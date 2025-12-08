@@ -1,0 +1,3 @@
+[submodule "meetup-project/lib/openzeppelin-contracts"]
+	path = meetup-project/lib/openzeppelin-contracts
+	url = https://github.com/openzeppelin/openzeppelin-contracts

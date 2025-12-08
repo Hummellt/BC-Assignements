@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT
-pragma solidity =0.8.20;
+pragma solidity ^0.8.24;
 
 import "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
+import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 
 contract EscrowContract is EIP712 {
     enum State { Created, InProgress, Finalized }
@@ -33,10 +34,8 @@ contract EscrowContract is EIP712 {
         uint256 _meetingTime,
         uint256 _depositAmount,
         uint256 _penaltyRatePerMinute
-    ) {
+    ) EIP712("MeetupAttestation", "1") {
         require(_meetingTime > block.timestamp, "Meeting time must be in the future");
-        // EIP712 constructor
-        _initializeEIP712("MeetupAttestation", "1");
         require(_participants.length >= 2, "Must have at least 2 participants");
         require(_depositAmount > 0, "Deposit must be > 0");
 
@@ -75,11 +74,13 @@ contract EscrowContract is EIP712 {
         require(isParticipant[msg.sender], "Not a participant");
         require(isParticipant[attester1] && isParticipant[attester2], "Attesters must be participants");
         require(contractState != State.Finalized, "Already finalized");
+        require(bytes(ipfsHash).length > 0, "IPFS hash required");
         require(timestamp >= meetingTime, "Attestation cannot be from before the meeting time");
 
         // Verify the signatures
         bytes32 structHash = _hashTypedDataV4(keccak256(abi.encode(
-            keccak256("Attestation(address attester1,address attester2,uint256 timestamp)"),
+            keccak256("Attestation(address arriver,address attester1,address attester2,uint256 timestamp)"),
+            msg.sender,
             attester1,
             attester2,
             timestamp
@@ -93,15 +94,10 @@ contract EscrowContract is EIP712 {
             "Invalid signatures"
         );
 
-        // Record arrival time for both participants in the attestation, if not already recorded.
-        // This ensures the first valid proof sets their arrival time.
-        if (arrivalTimes[attester1] == 0) {
-            arrivalTimes[attester1] = timestamp;
-            emit Arrived(attester1, timestamp);
-        }
-        if (arrivalTimes[attester2] == 0) {
-            arrivalTimes[attester2] = timestamp;
-            emit Arrived(attester2, timestamp);
+        // Record arrival time for the caller, if not already recorded.
+        if (arrivalTimes[msg.sender] == 0) {
+            arrivalTimes[msg.sender] = timestamp;
+            emit Arrived(msg.sender, timestamp);
         }
 
         // Transition state if this is the first arrival confirmation
@@ -110,6 +106,57 @@ contract EscrowContract is EIP712 {
         }
 
         emit ArrivalProofSubmitted(msg.sender, ipfsHash);
+    }
+
+
+     // @dev Allows cancellation before any arrivals, refunding all participants.
+    function cancelBeforeArrivals() external {
+        require(contractState != State.Finalized, "Already finalized");
+        require(contractState == State.Created, "Cannot cancel after arrivals have begun");
+        require(isParticipant[msg.sender], "Not a participant");
+
+        // Refund all participants who have deposited
+        // The balances are already set from deposit(), only need to enable withdrawal.
+        contractState = State.Finalized;
+        emit ContractCancelled();
+    }
+
+    // @dev Finalizes the contract, calculating penalties and distributing funds.
+    // by anyone after a reasonable time has passed since the meeting.
+    function finalize() external {
+        require(block.timestamp > meetingTime + 1 hours, "Finalization window not yet open");
+        require(contractState != State.Finalized, "Contract already finalized");
+
+        uint256 totalPenalties = 0;
+        uint256 punctualParticipantsCount = 0;
+
+        // First pass: Calculate total penalties and count punctual participants
+        for (uint i = 0; i < participants.length; i++) {
+            address p = participants[i];
+            if (balances[p] == depositAmount) { // Ensure they deposited
+                uint256 penalty = _calculatePenalty(arrivalTimes[p]);
+                if (penalty == 0 && arrivalTimes[p] != 0) {
+                    punctualParticipantsCount++;
+                }
+                totalPenalties += penalty;
+                balances[p] -= penalty; // Deduct penalty from their balance
+            }
+        }
+
+        // Second pass: Distribute penalties to punctual participants
+        if (totalPenalties > 0 && punctualParticipantsCount > 0) {
+            uint256 rewardPerPunctual = totalPenalties / punctualParticipantsCount;
+            for (uint i = 0; i < participants.length; i++) {
+                address p = participants[i];
+                // A participant is punctual if they deposited, arrived, and had no penalty
+                if (balances[p] == (depositAmount - _calculatePenalty(arrivalTimes[p])) && arrivalTimes[p] != 0 && _calculatePenalty(arrivalTimes[p]) == 0) {
+                    balances[p] += rewardPerPunctual;
+                }
+            }
+        }
+
+        contractState = State.Finalized;
+        emit Finalized(block.timestamp);
     }
 
     function _calculatePenalty(uint256 arrivalTime) private view returns (uint256) {
@@ -125,6 +172,23 @@ contract EscrowContract is EIP712 {
         return EIP712._hashTypedDataV4(structHash);
     }
 
+    // @dev Public helper to produce the EIP-712 digest for an attestation (useful for tests/signing)
+    function hashAttestation(
+        address arriver,
+        address attester1,
+        address attester2,
+        uint256 timestamp
+    ) public view returns (bytes32) {
+        bytes32 structHash = keccak256(abi.encode(
+            keccak256("Attestation(address arriver,address attester1,address attester2,uint256 timestamp)"),
+            arriver,
+            attester1,
+            attester2,
+            timestamp
+        ));
+        return _hashTypedDataV4(structHash);
+    }
+
     /**
      * @dev Allows participants to withdraw their balance after finalization.
      * This is the secure "pull-over-push" pattern.
@@ -138,5 +202,7 @@ contract EscrowContract is EIP712 {
         balances[msg.sender] = 0;
         (bool success, ) = msg.sender.call{value: amount}("");
         require(success, "Transfer failed");
+
+        emit Withdrawn(msg.sender, amount);
     }
 }

@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
+pragma solidity ^0.8.24;
 
 import {Test} from "forge-std/Test.sol";
+import {EIP712} from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
 import {EscrowContract} from "src/EscrowContract.sol";
 
-contract EscrowContractTest is Test {
+contract EscrowContractTest is Test, EIP712("MeetupAttestation", "1") {
     EscrowContract public meetup;
 
     address public owner; // Not explicitly used in contract, but good for general testing
@@ -12,6 +13,11 @@ contract EscrowContractTest is Test {
     address public participant2;
     address public participant3; // For multi-participant scenarios
     address public nonParticipant;
+
+    // Define private keys for test accounts for reproducible signatures
+    uint256 public constant PARTICIPANT1_PK = 0x1;
+    uint256 public constant PARTICIPANT2_PK = 0x2;
+    uint256 public constant PARTICIPANT3_PK = 0x3;
 
     uint256 public immutable TEST_DEPOSIT_AMOUNT = 1 ether;
     uint256 public immutable TEST_PENALTY_RATE = 200; // 2% per minute
@@ -25,9 +31,9 @@ contract EscrowContractTest is Test {
     function setUp() public {
         // Set up test accounts
         owner = makeAddr("owner");
-        participant1 = makeAddr("participant1");
-        participant2 = makeAddr("participant2");
-        participant3 = makeAddr("participant3");
+        participant1 = vm.addr(PARTICIPANT1_PK);
+        participant2 = vm.addr(PARTICIPANT2_PK);
+        participant3 = vm.addr(PARTICIPANT3_PK);
         nonParticipant = makeAddr("nonParticipant");
 
         // Fund participants for deposits
@@ -158,62 +164,83 @@ contract EscrowContractTest is Test {
     // --- Confirm Arrival Tests ---
 
     function testConfirmArrival_Success() public {
-        address[] memory participants_ = new address[](2);
+        address[] memory participants_ = new address[](3);
         participants_[0] = participant1;
         participants_[1] = participant2;
+        participants_[2] = participant3;
         meetup = new EscrowContract(participants_, TEST_MEETING_TIME, TEST_DEPOSIT_AMOUNT, TEST_PENALTY_RATE);
 
         // Deposit first
         vm.prank(participant1);
+        meetup.deposit{value: TEST_DEPOSIT_AMOUNT}();
+        vm.prank(participant2);
+        meetup.deposit{value: TEST_DEPOSIT_AMOUNT}();
+        vm.prank(participant3);
         meetup.deposit{value: TEST_DEPOSIT_AMOUNT}();
 
         // Advance time to after the meeting
         vm.warp(TEST_MEETING_TIME + 10 minutes);
+        uint256 arrivalTimestamp = block.timestamp;
+
+        // Create and sign the attestation from participant2 and participant3 for participant1
+        // Get the exact digest as the EscrowContract expects and sign it.
+        bytes32 digest = meetup.hashAttestation(participant1, participant2, participant3, arrivalTimestamp);
+        (uint8 v1, bytes32 r1, bytes32 s1) = vm.sign(PARTICIPANT2_PK, digest);
+        (uint8 v2, bytes32 r2, bytes32 s2) = vm.sign(PARTICIPANT3_PK, digest);
+        bytes memory signature1 = abi.encodePacked(r1, s1, v1);
+        bytes memory signature2 = abi.encodePacked(r2, s2, v2);
 
         vm.startPrank(participant1);
-        vm.expectEmit(true, false, false, true); // ArrivalProofSubmitted(address indexed, string)
-        emit ArrivalProofSubmitted(participant1, "ipfs://proof1"); // check topic1 (participant) and data (ipfsHash)
-        vm.expectEmit(true, false, false, true); // Arrived(address indexed, uint256)
-        emit Arrived(participant1, block.timestamp);
-        meetup.confirmArrival("ipfs://proof1");
+        // Events must be checked in the order they are emitted.
+        // By specifying the contract address, we can stack multiple event checks.
+        // 1. Arrived event - check participant (topic1) and arrivalTime (data)
+        vm.expectEmit(true, false, false, true, address(meetup));
+        emit Arrived(participant1, arrivalTimestamp);
+        // 2. ArrivalProofSubmitted event - check participant (topic1) and ipfsHash (data)
+        vm.expectEmit(true, false, false, true, address(meetup));
+        emit ArrivalProofSubmitted(participant1, "ipfs://proof1");
+        meetup.confirmArrival(participant2, participant3, arrivalTimestamp, signature1, signature2, "ipfs://proof1");
         vm.stopPrank();
 
-        assertEq(meetup.arrivalTimes(participant1), TEST_MEETING_TIME + 10 minutes, "Arrival time incorrect");
-        assertEq(meetup.arrivalProofIPFS(participant1), "ipfs://proof1", "IPFS hash not stored");
+        assertEq(meetup.arrivalTimes(participant1), arrivalTimestamp, "Arrival time incorrect");
         assertEq(uint8(meetup.contractState()), uint8(EscrowContract.State.InProgress), "State not InProgress after first arrival");
     }
 
     function testConfirmArrival_RevertsBeforeMeetingTime() public {
-        address[] memory participants_ = new address[](2);
+        address[] memory participants_ = new address[](3);
         participants_[0] = participant1;
         participants_[1] = participant2;
+        participants_[2] = participant3;
         meetup = new EscrowContract(participants_, TEST_MEETING_TIME, TEST_DEPOSIT_AMOUNT, TEST_PENALTY_RATE);
 
         // Deposit first
         vm.prank(participant1);
         meetup.deposit{value: TEST_DEPOSIT_AMOUNT}();
 
+        // !Note: We don't need to create valid signatures here as the time check comes first.
         // Time is still before TEST_MEETING_TIME (from setUp)
         vm.startPrank(participant1);
-        vm.expectRevert("Meeting time not reached");
-        meetup.confirmArrival("ipfs://proof1");
+        vm.expectRevert("Attestation cannot be from before the meeting time");
+        meetup.confirmArrival(participant2, participant3, block.timestamp, "", "", "ipfs://proof1");
         vm.stopPrank();
     }
 
     function testConfirmArrival_RevertsOnEmptyIpfsHash() public {
-        address[] memory participants_ = new address[](2);
+        address[] memory participants_ = new address[](3);
         participants_[0] = participant1;
         participants_[1] = participant2;
+        participants_[2] = participant3;
         meetup = new EscrowContract(participants_, TEST_MEETING_TIME, TEST_DEPOSIT_AMOUNT, TEST_PENALTY_RATE);
 
         vm.prank(participant1);
         meetup.deposit{value: TEST_DEPOSIT_AMOUNT}();
 
         vm.warp(TEST_MEETING_TIME + 10 minutes);
-
+        
+        // We don't need valid signatures because the IPFS hash check comes first
         vm.startPrank(participant1);
         vm.expectRevert("IPFS hash required");
-        meetup.confirmArrival("");
+        meetup.confirmArrival(participant2, participant3, block.timestamp, "", "", "");
         vm.stopPrank();
     }
 }
