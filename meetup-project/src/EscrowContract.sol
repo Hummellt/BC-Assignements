@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity =0.8.20;
 
-import "@openzeppelin/contracts/utils/Address.sol";
-contract MeetupContract {
+contract EscrowContract {
     enum State { Created, InProgress, Finalized }
 
     // state Vars
