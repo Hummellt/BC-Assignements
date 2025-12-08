@@ -22,6 +22,9 @@ contract MeetupContract {
     // NEW: stores IPFS hashes with the arrival proofs
     mapping(address => string) public arrivalProofIPFS;
 
+    // NEW: Secure withdrawal pattern state
+    mapping(address => uint256) public balances;
+
     // Events
     event Deposited(address indexed participant, uint256 amount);
     event Arrived(address indexed participant, uint256 arrivalTime);
@@ -57,6 +60,7 @@ contract MeetupContract {
         require(msg.value == depositAmount, "Incorrect deposit amount");
         require(!finalized, "Already finalized");
 
+        balances[msg.sender] += msg.value;
         emit Deposited(msg.sender, msg.value);
     }
 
@@ -127,11 +131,11 @@ contract MeetupContract {
             if (penalty1 == 0 && penalty2 == 0) {
                 _refundBoth();
             } else if (penalty1 > penalty2) {
-                _transferWithRevert(participant2, penalty1);
-                _transferWithRevert(participant1, depositAmount - penalty1);
+                balances[participant2] += penalty1;
+                balances[participant1] += depositAmount - penalty1;
             } else if (penalty2 > penalty1) {
-                _transferWithRevert(participant1, penalty2);
-                _transferWithRevert(participant2, depositAmount - penalty2);
+                balances[participant1] += penalty2;
+                balances[participant2] += depositAmount - penalty2;
             } else {
                 // Both equally late → no penalty
                 _refundBoth();
@@ -140,18 +144,18 @@ contract MeetupContract {
             emit Finalized(participant1, participant2, true);
         } else {
             // Only one participant arrived
-            address payable lateParticipant = !arrived1 ? participant1 : participant2;
-            address payable onTimeParticipant = arrived1 ? participant1 : participant2;
+            address lateParticipant = !arrived1 ? participant1 : participant2;
+            address onTimeParticipant = arrived1 ? participant1 : participant2;
             uint256 penalty = _calculatePenalty();
-            _transferWithRevert(onTimeParticipant, penalty);
-            _transferWithRevert(lateParticipant, depositAmount - penalty);
+            balances[onTimeParticipant] += penalty;
+            balances[lateParticipant] += depositAmount - penalty;
             emit Finalized(participant1, participant2, false);
         }
     }
 
     function _refundBoth() private {
-        _transferWithRevert(participant1, depositAmount);
-        _transferWithRevert(participant2, depositAmount);
+        balances[participant1] += depositAmount;
+        balances[participant2] += depositAmount;
     }    
 
     function _calculatePenalty() private view returns (uint256) {
@@ -162,9 +166,18 @@ contract MeetupContract {
         return penalty;
     }
 
-    function _transferWithRevert(address payable to, uint256 amount) private {
-        if (amount == 0) return;
-        (bool success, ) = to.call{value: amount}("");
+    /**
+     * @dev Allows participants to withdraw their balance after finalization.
+     * This is the secure "pull-over-push" pattern.
+     */
+    function withdraw() external {
+        require(finalized, "Contract not finalized");
+        uint256 amount = balances[msg.sender];
+        require(amount > 0, "No balance to withdraw");
+
+        // Checks-Effects-Interactions Pattern to prevent re-entrancy
+        balances[msg.sender] = 0;
+        (bool success, ) = msg.sender.call{value: amount}("");
         require(success, "Transfer failed");
     }
 
