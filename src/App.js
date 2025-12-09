@@ -374,6 +374,7 @@ function App() {
         a,
         b,
         ts,
+        contract: addresses.meetup, // include contract to prevent cross-contract replay
         sigCallerForOther,
       };
 
@@ -409,6 +410,22 @@ function App() {
       if (parsed && parsed.type === "mutual-request") {
         const signer = defaultProvider.getSigner();
         const me = (await signer.getAddress()).toLowerCase();
+
+        // Basic freshness/validity checks to avoid signing pre-generated requests
+        const now = Math.floor(Date.now() / 1000);
+        const tsNum = Number(parsed.ts);
+        const MAX_SKEW = 5 * 60; // 5 minutes allowed skew
+
+        if (parsed.contract && parsed.contract !== addresses.meetup) {
+          setStatus("Mutual request rejected: wrong contract in payload.");
+          return;
+        }
+
+        if (Math.abs(now - tsNum) > MAX_SKEW) {
+          setStatus("Mutual request rejected: timestamp not within allowed window.");
+          return;
+        }
+
         const aLower = String(parsed.a).toLowerCase();
         const bLower = String(parsed.b).toLowerCase();
 
