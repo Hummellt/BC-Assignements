@@ -20,6 +20,16 @@
 				"internalType": "uint256",
 				"name": "_penaltyRatePerMinute",
 				"type": "uint256"
+			},
+			{
+				"internalType": "uint8",
+				"name": "_honestyRatePercent",
+				"type": "uint8"
+			},
+			{
+				"internalType": "uint256",
+				"name": "_reportingWindowSeconds",
+				"type": "uint256"
 			}
 		],
 		"stateMutability": "nonpayable",
@@ -148,6 +158,25 @@
 			}
 		],
 		"name": "Finalized",
+		"type": "event"
+	},
+	{
+		"anonymous": false,
+		"inputs": [
+			{
+				"indexed": true,
+				"internalType": "address",
+				"name": "reporter",
+				"type": "address"
+			},
+			{
+				"indexed": true,
+				"internalType": "address",
+				"name": "punctual",
+				"type": "address"
+			}
+		],
+		"name": "ReportedOnlyArrived",
 		"type": "event"
 	},
 	{
@@ -451,6 +480,19 @@
 		"type": "function"
 	},
 	{
+		"inputs": [],
+		"name": "honestyRatePercent",
+		"outputs": [
+			{
+				"internalType": "uint8",
+				"name": "",
+				"type": "uint8"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
 		"inputs": [
 			{
 				"internalType": "address",
@@ -485,6 +527,25 @@
 	{
 		"inputs": [
 			{
+				"internalType": "address",
+				"name": "",
+				"type": "address"
+			}
+		],
+		"name": "onlyArrivedVote",
+		"outputs": [
+			{
+				"internalType": "address",
+				"name": "",
+				"type": "address"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
 				"internalType": "uint256",
 				"name": "",
 				"type": "uint256"
@@ -504,6 +565,64 @@
 	{
 		"inputs": [],
 		"name": "penaltyRatePerMinute",
+		"outputs": [
+			{
+				"internalType": "uint256",
+				"name": "",
+				"type": "uint256"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "address",
+				"name": "punctual",
+				"type": "address"
+			}
+		],
+		"name": "reportOnlyArrived",
+		"outputs": [],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [],
+		"name": "reportingWindowSeconds",
+		"outputs": [
+			{
+				"internalType": "uint256",
+				"name": "",
+				"type": "uint256"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [],
+		"name": "totalVotes",
+		"outputs": [
+			{
+				"internalType": "uint256",
+				"name": "",
+				"type": "uint256"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "address",
+				"name": "",
+				"type": "address"
+			}
+		],
+		"name": "voteCounts",
 		"outputs": [
 			{
 				"internalType": "uint256",

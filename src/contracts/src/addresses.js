@@ -1,5 +1,5 @@
 const addresses = {
-  meetup: "0x65454C3697A5D660613aEa3f2f01bc84479BFF69",
+  meetup: "0x3f79a2bC8837a924e93Cb596D1859ff505BA8B6D",
 };
 
 export default addresses;
