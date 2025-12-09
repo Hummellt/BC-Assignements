@@ -19,6 +19,10 @@ contract EscrowContractEnhancedTest is Test {
     uint256 deposit = 1 ether;
     uint256 penaltyRate = 200; // 2% per minute
 
+    // new test config values matching updated constructor
+    uint8 constant HONESTY_PERCENT = 50;
+    uint256 constant REPORTING_WINDOW = 3600;
+
     function setUp() public {
         participant1 = vm.addr(PK1);
         participant2 = vm.addr(PK2);
@@ -36,7 +40,7 @@ contract EscrowContractEnhancedTest is Test {
         parts[0] = participant1;
         parts[1] = participant2;
         parts[2] = participant3;
-        meetup = new EscrowContract(parts, meetingTime, deposit, penaltyRate);
+        meetup = new EscrowContract(parts, meetingTime, deposit, penaltyRate, HONESTY_PERCENT, REPORTING_WINDOW);
 
         vm.prank(participant1);
         meetup.deposit{value: deposit}();
@@ -67,7 +71,7 @@ contract EscrowContractEnhancedTest is Test {
         parts[0] = participant1;
         parts[1] = participant2;
         parts[2] = participant3;
-        meetup = new EscrowContract(parts, meetingTime, deposit, penaltyRate);
+        meetup = new EscrowContract(parts, meetingTime, deposit, penaltyRate, HONESTY_PERCENT, REPORTING_WINDOW);
 
         // everyone deposits
         vm.prank(participant1); meetup.deposit{value: deposit}();
@@ -132,7 +136,7 @@ contract EscrowContractEnhancedTest is Test {
         address[] memory parts = new address[](2);
         parts[0] = participant1;
         parts[1] = participant2;
-        meetup = new EscrowContract(parts, meetingTime, deposit, penaltyRate);
+        meetup = new EscrowContract(parts, meetingTime, deposit, penaltyRate, HONESTY_PERCENT, REPORTING_WINDOW);
 
         // both deposit
         vm.prank(participant1); meetup.deposit{value: deposit}();

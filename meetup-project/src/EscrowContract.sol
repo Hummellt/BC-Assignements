@@ -42,15 +42,32 @@ contract EscrowContract is EIP712 {
         "MutualAttestation(address a,address b,uint256 timestamp)"
     );
 
+    // config for voting-based resolution
+    // Percentage (0..100) of deposit returned to honest absentees when voting resolution triggers.
+    uint8 public honestyRatePercent;
+    // Reporting window (seconds) after meetingTime during which participants can vote
+    uint256 public reportingWindowSeconds;
+
+    // Voting storage: voter => candidate they reported as the only arriver
+    mapping(address => address) public onlyArrivedVote;
+    // Candidate -> number of votes
+    mapping(address => uint256) public voteCounts;
+    uint256 public totalVotes;
+
+    event ReportedOnlyArrived(address indexed reporter, address indexed punctual);
+
     constructor(
         address[] memory _participants,
         uint256 _meetingTime,
         uint256 _depositAmount,
-        uint256 _penaltyRatePerMinute
+        uint256 _penaltyRatePerMinute,
+        uint8 _honestyRatePercent,
+        uint256 _reportingWindowSeconds
     ) EIP712("MeetupAttestation", "1") {
         require(_meetingTime > block.timestamp, "Meeting time must be in the future");
         require(_participants.length >= 2, "Must have at least 2 participants");
         require(_depositAmount > 0, "Deposit must be > 0");
+        require(_honestyRatePercent <= 100, "honestyRatePercent must be 0..100");
 
         for (uint i = 0; i < _participants.length; i++) {
             address p = _participants[i];
@@ -64,6 +81,9 @@ contract EscrowContract is EIP712 {
         depositAmount = _depositAmount;
         penaltyRatePerMinute = _penaltyRatePerMinute;
         contractState = State.Created;
+
+        honestyRatePercent = _honestyRatePercent;
+        reportingWindowSeconds = _reportingWindowSeconds;
     }
 
     function deposit() external payable {
@@ -184,6 +204,24 @@ contract EscrowContract is EIP712 {
         }
     }
 
+    // participants can report (vote) who was the only arriver.
+    // Only participants who deposited can vote.
+    // Voting allowed within [meetingTime, meetingTime + reportingWindowSeconds]
+    function reportOnlyArrived(address punctual) external {
+        require(isParticipant[msg.sender], "Not a participant");
+        require(isParticipant[punctual], "Punctual must be a participant");
+        require(block.timestamp >= meetingTime, "Reporting not yet open");
+        require(block.timestamp <= meetingTime + reportingWindowSeconds, "Reporting window closed");
+        require(onlyArrivedVote[msg.sender] == address(0), "Already reported");
+        require(balances[msg.sender] == depositAmount, "Only deposited participants may report");
+
+        onlyArrivedVote[msg.sender] = punctual;
+        voteCounts[punctual] += 1;
+        totalVotes += 1;
+
+        emit ReportedOnlyArrived(msg.sender, punctual);
+    }
+
     // @dev Allows cancellation before any arrivals, refunding all participants.
     function cancelBeforeArrivals() external {
         require(contractState != State.Finalized, "Already finalized");
@@ -196,12 +234,91 @@ contract EscrowContract is EIP712 {
         emit ContractCancelled();
     }
 
+    // count recorded on-chain arrivals
+    function _countRecordedArrivals() internal view returns (uint256) {
+        uint256 cnt = 0;
+        for (uint i = 0; i < participants.length; i++) {
+            if (arrivalTimes[participants[i]] != 0) cnt++;
+        }
+        return cnt;
+    }
+
     // @dev Finalizes the contract, calculating penalties and distributing funds.
     // by anyone after a reasonable time has passed since the meeting.
     function finalize() external {
-        require(block.timestamp > meetingTime + 1 hours, "Finalization window not yet open");
+        // Allow finalize in two cases:
+        // 1) default flow: > meetingTime + 1 hour (when at least two people attest each others presence)
+        // 2) voting-based resolution: if no on-chain arrivals recorded and reporting window passed
+        bool votingWindowExpired = block.timestamp > meetingTime + reportingWindowSeconds;
+        uint256 recorded = _countRecordedArrivals();
+        require(
+            block.timestamp > meetingTime + 1 hours || (votingWindowExpired && recorded == 0),
+            "Finalization window not yet open"
+        );
         require(contractState != State.Finalized, "Contract already finalized");
 
+        // If NO on-chain arrivals recorded and voting was used, check for 2/3 majority and apply voting resolution
+        if (recorded == 0 && votingWindowExpired && totalVotes > 0) {
+            // compute quorum = ceil(2N/3)
+            uint256 n = participants.length;
+            uint256 quorum = (2 * n + 2) / 3; // ceil(2n/3)
+            // find candidate with highest votes
+            address winning = address(0);
+            uint256 winningCount = 0;
+            for (uint i = 0; i < n; i++) {
+                address cand = participants[i];
+                uint256 c = voteCounts[cand];
+                if (c > winningCount) {
+                    winningCount = c;
+                    winning = cand;
+                }
+            }
+
+            if (winning != address(0) && winningCount >= quorum) {
+                // apply distribution based on votes:
+                // - honest absentees (voted for winning) get honestyRatePercent% back
+                // - dishonest voters / non-voters (did not vote for winning) lose their deposit
+                // - winning gets their deposit plus remainder from others
+                uint256 winnerBalance = 0;
+                // start with winner's own deposit if they deposited
+                if (balances[winning] == depositAmount) {
+                    winnerBalance += balances[winning];
+                    balances[winning] = 0;
+                }
+
+                for (uint i = 0; i < n; i++) {
+                    address p = participants[i];
+                    if (p == winning) continue;
+                    if (balances[p] != depositAmount) {
+                        // didn't deposit -> nothing to move
+                        continue;
+                    }
+
+                    address voted = onlyArrivedVote[p];
+                    if (voted == winning) {
+                        // honest absentee: give back honestyRatePercent% and transfer remainder to winner
+                        uint256 honestBack = (depositAmount * honestyRatePercent) / 100;
+                        uint256 remainder = depositAmount - honestBack;
+                        balances[p] = honestBack;
+                        winnerBalance += remainder;
+                    } else {
+                        // punished: lose deposit entirely; transfer whole deposit to winner
+                        balances[p] = 0;
+                        winnerBalance += depositAmount;
+                    }
+                }
+
+                // set winner final balance
+                balances[winning] = winnerBalance;
+
+                contractState = State.Finalized;
+                emit Finalized(block.timestamp);
+                return;
+            }
+            // else: no adequate quorum via voting -> fall through to normal finalize logic
+        }
+
+        // --- existing finalize logic (penalties/rewards based on recorded arrivalTimes) ---
         uint256 totalPenalties = 0;
         uint256 punctualParticipantsCount = 0;
 

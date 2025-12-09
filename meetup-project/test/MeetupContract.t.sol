@@ -23,6 +23,10 @@ contract EscrowContractTest is Test, EIP712("MeetupAttestation", "1") {
     uint256 public immutable TEST_PENALTY_RATE = 200; // 2% per minute
     uint256 public TEST_MEETING_TIME;
 
+    // new test config values matching updated constructor
+    uint8 public constant TEST_HONESTY_PERCENT = 50;
+    uint256 public constant TEST_REPORTING_WINDOW_SECONDS = 3600;
+    
     // --- Events to test ---
     event Deposited(address indexed participant, uint256 amount);
     event Arrived(address indexed participant, uint256 arrivalTime);
@@ -57,7 +61,9 @@ contract EscrowContractTest is Test, EIP712("MeetupAttestation", "1") {
             participants_,
             TEST_MEETING_TIME,
             TEST_DEPOSIT_AMOUNT,
-            TEST_PENALTY_RATE
+            TEST_PENALTY_RATE,
+            TEST_HONESTY_PERCENT,
+            TEST_REPORTING_WINDOW_SECONDS
         );
 
         assertEq(meetup.meetingTime(), TEST_MEETING_TIME, "Meeting time mismatch");
@@ -82,7 +88,9 @@ contract EscrowContractTest is Test, EIP712("MeetupAttestation", "1") {
             participants_,
             TEST_MEETING_TIME, // This is now in the past relative to vm.warp
             TEST_DEPOSIT_AMOUNT,
-            TEST_PENALTY_RATE
+            TEST_PENALTY_RATE,
+            TEST_HONESTY_PERCENT,
+            TEST_REPORTING_WINDOW_SECONDS
         );
     }
 
@@ -95,7 +103,9 @@ contract EscrowContractTest is Test, EIP712("MeetupAttestation", "1") {
             participants_,
             TEST_MEETING_TIME,
             TEST_DEPOSIT_AMOUNT,
-            TEST_PENALTY_RATE
+            TEST_PENALTY_RATE,
+            TEST_HONESTY_PERCENT,
+            TEST_REPORTING_WINDOW_SECONDS
         );
     }
 
@@ -109,7 +119,9 @@ contract EscrowContractTest is Test, EIP712("MeetupAttestation", "1") {
             participants_,
             TEST_MEETING_TIME,
             0, // Zero deposit
-            TEST_PENALTY_RATE
+            TEST_PENALTY_RATE,
+            TEST_HONESTY_PERCENT,
+            TEST_REPORTING_WINDOW_SECONDS
         );
     }
 
@@ -124,7 +136,9 @@ contract EscrowContractTest is Test, EIP712("MeetupAttestation", "1") {
             participants_,
             TEST_MEETING_TIME,
             TEST_DEPOSIT_AMOUNT,
-            TEST_PENALTY_RATE
+            TEST_PENALTY_RATE,
+            TEST_HONESTY_PERCENT,
+            TEST_REPORTING_WINDOW_SECONDS
         );
 
         vm.startPrank(participant1);
@@ -141,7 +155,7 @@ contract EscrowContractTest is Test, EIP712("MeetupAttestation", "1") {
         address[] memory participants_ = new address[](2);
         participants_[0] = participant1;
         participants_[1] = participant2;
-        meetup = new EscrowContract(participants_, TEST_MEETING_TIME, TEST_DEPOSIT_AMOUNT, TEST_PENALTY_RATE);
+        meetup = new EscrowContract(participants_, TEST_MEETING_TIME, TEST_DEPOSIT_AMOUNT, TEST_PENALTY_RATE, TEST_HONESTY_PERCENT, TEST_REPORTING_WINDOW_SECONDS);
 
         vm.startPrank(participant1);
         vm.expectRevert("Incorrect deposit amount");
@@ -153,7 +167,7 @@ contract EscrowContractTest is Test, EIP712("MeetupAttestation", "1") {
         address[] memory participants_ = new address[](2);
         participants_[0] = participant1;
         participants_[1] = participant2;
-        meetup = new EscrowContract(participants_, TEST_MEETING_TIME, TEST_DEPOSIT_AMOUNT, TEST_PENALTY_RATE);
+        meetup = new EscrowContract(participants_, TEST_MEETING_TIME, TEST_DEPOSIT_AMOUNT, TEST_PENALTY_RATE, TEST_HONESTY_PERCENT, TEST_REPORTING_WINDOW_SECONDS);
 
         vm.prank(nonParticipant);
         // Expect a revert with the specific error string from the require statement.
@@ -168,7 +182,7 @@ contract EscrowContractTest is Test, EIP712("MeetupAttestation", "1") {
         participants_[0] = participant1;
         participants_[1] = participant2;
         participants_[2] = participant3;
-        meetup = new EscrowContract(participants_, TEST_MEETING_TIME, TEST_DEPOSIT_AMOUNT, TEST_PENALTY_RATE);
+        meetup = new EscrowContract(participants_, TEST_MEETING_TIME, TEST_DEPOSIT_AMOUNT, TEST_PENALTY_RATE, TEST_HONESTY_PERCENT, TEST_REPORTING_WINDOW_SECONDS);
 
         // Deposit first
         vm.prank(participant1);
@@ -211,7 +225,7 @@ contract EscrowContractTest is Test, EIP712("MeetupAttestation", "1") {
         participants_[0] = participant1;
         participants_[1] = participant2;
         participants_[2] = participant3;
-        meetup = new EscrowContract(participants_, TEST_MEETING_TIME, TEST_DEPOSIT_AMOUNT, TEST_PENALTY_RATE);
+        meetup = new EscrowContract(participants_, TEST_MEETING_TIME, TEST_DEPOSIT_AMOUNT, TEST_PENALTY_RATE, TEST_HONESTY_PERCENT, TEST_REPORTING_WINDOW_SECONDS);
 
         // Deposit first
         vm.prank(participant1);
@@ -230,7 +244,7 @@ contract EscrowContractTest is Test, EIP712("MeetupAttestation", "1") {
         participants_[0] = participant1;
         participants_[1] = participant2;
         participants_[2] = participant3;
-        meetup = new EscrowContract(participants_, TEST_MEETING_TIME, TEST_DEPOSIT_AMOUNT, TEST_PENALTY_RATE);
+        meetup = new EscrowContract(participants_, TEST_MEETING_TIME, TEST_DEPOSIT_AMOUNT, TEST_PENALTY_RATE, TEST_HONESTY_PERCENT, TEST_REPORTING_WINDOW_SECONDS);
 
         vm.prank(participant1);
         meetup.deposit{value: TEST_DEPOSIT_AMOUNT}();
@@ -242,5 +256,60 @@ contract EscrowContractTest is Test, EIP712("MeetupAttestation", "1") {
         vm.expectRevert("IPFS hash required");
         meetup.confirmArrival(participant2, participant3, block.timestamp, "", "", "");
         vm.stopPrank();
+    }
+
+    // voting-based resolution when nobody shows up
+    function testVotingResolution_NoOneShowsUp() public {
+        // 3 participants: p1 & p2 deposit and vote that p3 was the only arriver
+        address[] memory participants_ = new address[](3);
+        participants_[0] = participant1;
+        participants_[1] = participant2;
+        participants_[2] = participant3;
+
+        meetup = new EscrowContract(
+            participants_,
+            TEST_MEETING_TIME,
+            TEST_DEPOSIT_AMOUNT,
+            TEST_PENALTY_RATE,
+            TEST_HONESTY_PERCENT,
+            TEST_REPORTING_WINDOW_SECONDS
+        );
+
+        // Only p1 and p2 deposit (they will be voters). p3 does not deposit.
+        vm.prank(participant1); meetup.deposit{value: TEST_DEPOSIT_AMOUNT}();
+        vm.prank(participant2); meetup.deposit{value: TEST_DEPOSIT_AMOUNT}();
+
+        // Advance into reporting window and submit votes
+        vm.warp(TEST_MEETING_TIME + 10);
+        vm.prank(participant1); meetup.reportOnlyArrived(participant3);
+        vm.prank(participant2); meetup.reportOnlyArrived(participant3);
+
+        // Advance past reporting window to allow finalize via voting path
+        vm.warp(TEST_MEETING_TIME + TEST_REPORTING_WINDOW_SECONDS + 1);
+
+        // finalize should apply voting resolution (quorum for n=3 is 2)
+        meetup.finalize();
+
+        // compute expected outcomes:
+        // honestBack = deposit * honesty% = 1 ether * 50% = 0.5 ether
+        uint256 honestBack = (TEST_DEPOSIT_AMOUNT * TEST_HONESTY_PERCENT) / 100;
+        uint256 remainder = TEST_DEPOSIT_AMOUNT - honestBack;
+        // p1 and p2 each should be left with honestBack
+        assertEq(meetup.balances(participant1), honestBack);
+        assertEq(meetup.balances(participant2), honestBack);
+        // winner (participant3) should receive remainders from p1 and p2 => 2 * remainder
+        uint256 expectedWinner = remainder * 2;
+        assertEq(meetup.balances(participant3), expectedWinner);
+
+        // contract should be finalized
+        assertEq(uint8(meetup.contractState()), uint8(EscrowContract.State.Finalized));
+
+        // Withdrawals should work
+        vm.prank(participant1); meetup.withdraw();
+        vm.prank(participant2); meetup.withdraw();
+        vm.prank(participant3); meetup.withdraw();
+
+        // After withdrawals, contract balance should be zero
+        assertEq(address(meetup).balance, 0);
     }
 }
