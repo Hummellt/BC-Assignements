@@ -275,9 +275,10 @@ contract EscrowContractTest is Test, EIP712("MeetupAttestation", "1") {
             TEST_REPORTING_WINDOW_SECONDS
         );
 
-        // Only p1 and p2 deposit (they will be voters). p3 does not deposit.
+        // p1, p2, and p3 all deposit.
         vm.prank(participant1); meetup.deposit{value: TEST_DEPOSIT_AMOUNT}();
         vm.prank(participant2); meetup.deposit{value: TEST_DEPOSIT_AMOUNT}();
+        vm.prank(participant3); meetup.deposit{value: TEST_DEPOSIT_AMOUNT}();
 
         // Advance into reporting window and submit votes
         vm.warp(TEST_MEETING_TIME + 10);
@@ -297,8 +298,9 @@ contract EscrowContractTest is Test, EIP712("MeetupAttestation", "1") {
         // p1 and p2 each should be left with honestBack
         assertEq(meetup.balances(participant1), honestBack);
         assertEq(meetup.balances(participant2), honestBack);
-        // winner (participant3) should receive remainders from p1 and p2 => 2 * remainder
-        uint256 expectedWinner = remainder * 2;
+        // winner (participant3) should receive their own deposit back, plus remainders from p1 and p2
+        // => deposit + 2 * remainder
+        uint256 expectedWinner = TEST_DEPOSIT_AMOUNT + (remainder * 2);
         assertEq(meetup.balances(participant3), expectedWinner);
 
         // contract should be finalized

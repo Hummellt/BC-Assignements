@@ -11,9 +11,10 @@ contract EscrowContract is EIP712 {
     address[] public participants;
     mapping(address => bool) public isParticipant;
 
-    uint256 public meetingTime;
-    uint256 public depositAmount;
-    uint256 public penaltyRatePerMinute; // e.g., 200 = 2% per minute
+    // make these immutable where possible (set in constructor once)
+    uint256 public immutable meetingTime;
+    uint256 public immutable depositAmount;
+    uint256 public immutable penaltyRatePerMinute; // e.g., 200 = 2% per minute
     State public contractState;
 
     // Stores the first valid arrival time for each participant
@@ -28,6 +29,7 @@ contract EscrowContract is EIP712 {
     event Deposited(address indexed participant, uint256 amount);
     event Arrived(address indexed participant, uint256 arrivalTime);
     event ArrivalProofSubmitted(address indexed participant, string ipfsHash);
+    event ReportedOnlyArrived(address indexed reporter, address indexed punctual);
     event ContractCancelled();
     event Finalized(uint256 finalizationTime);
     event Withdrawn(address indexed participant, uint256 amount);
@@ -42,19 +44,16 @@ contract EscrowContract is EIP712 {
         "MutualAttestation(address a,address b,uint256 timestamp)"
     );
 
-    // config for voting-based resolution
+    // config for voting-based resolution (make smaller type immutable)
     // Percentage (0..100) of deposit returned to honest absentees when voting resolution triggers.
-    uint8 public honestyRatePercent;
-    // Reporting window (seconds) after meetingTime during which participants can vote
-    uint256 public reportingWindowSeconds;
+    uint8 public immutable honestyRatePercent;
+    uint256 public immutable reportingWindowSeconds;
 
     // Voting storage: voter => candidate they reported as the only arriver
     mapping(address => address) public onlyArrivedVote;
     // Candidate -> number of votes
     mapping(address => uint256) public voteCounts;
     uint256 public totalVotes;
-
-    event ReportedOnlyArrived(address indexed reporter, address indexed punctual);
 
     constructor(
         address[] memory _participants,
@@ -244,11 +243,7 @@ contract EscrowContract is EIP712 {
     }
 
     // @dev Finalizes the contract, calculating penalties and distributing funds.
-    // by anyone after a reasonable time has passed since the meeting.
     function finalize() external {
-        // Allow finalize in two cases:
-        // 1) default flow: > meetingTime + 1 hour (when at least two people attest each others presence)
-        // 2) voting-based resolution: if no on-chain arrivals recorded and reporting window passed
         bool votingWindowExpired = block.timestamp > meetingTime + reportingWindowSeconds;
         uint256 recorded = _countRecordedArrivals();
         require(
@@ -257,21 +252,23 @@ contract EscrowContract is EIP712 {
         );
         require(contractState != State.Finalized, "Contract already finalized");
 
+        uint256 n = participants.length;
+
         // If NO on-chain arrivals recorded and voting was used, check for 2/3 majority and apply voting resolution
         if (recorded == 0 && votingWindowExpired && totalVotes > 0) {
             // compute quorum = ceil(2N/3)
-            uint256 n = participants.length;
             uint256 quorum = (2 * n + 2) / 3; // ceil(2n/3)
             // find candidate with highest votes
             address winning = address(0);
             uint256 winningCount = 0;
-            for (uint i = 0; i < n; i++) {
+            for (uint i = 0; i < n; ) {
                 address cand = participants[i];
                 uint256 c = voteCounts[cand];
                 if (c > winningCount) {
                     winningCount = c;
                     winning = cand;
                 }
+                unchecked { ++i; }
             }
 
             if (winning != address(0) && winningCount >= quorum) {
@@ -286,9 +283,12 @@ contract EscrowContract is EIP712 {
                     balances[winning] = 0;
                 }
 
-                for (uint i = 0; i < n; i++) {
+                for (uint i = 0; i < n; ) {
                     address p = participants[i];
-                    if (p == winning) continue;
+                    if (p == winning) {
+                        unchecked { ++i; }
+                        continue;
+                    }
                     if (balances[p] != depositAmount) {
                         // didn't deposit -> nothing to move
                         continue;
@@ -306,6 +306,7 @@ contract EscrowContract is EIP712 {
                         balances[p] = 0;
                         winnerBalance += depositAmount;
                     }
+                    unchecked { ++i; }
                 }
 
                 // set winner final balance
@@ -318,31 +319,43 @@ contract EscrowContract is EIP712 {
             // else: no adequate quorum via voting -> fall through to normal finalize logic
         }
 
-        // --- existing finalize logic (penalties/rewards based on recorded arrivalTimes) ---
         uint256 totalPenalties = 0;
-        uint256 punctualParticipantsCount = 0;
+        // only need punctual flags in memory; don't allocate penalties[] (never read later)
+        bool[] memory punctual = new bool[](n);
 
-        // First pass: Calculate total penalties and count punctual participants
-        for (uint i = 0; i < participants.length; i++) {
+        // First pass: compute penalties and count punctual participants
+        for (uint i = 0; i < n; ) {
             address p = participants[i];
-            if (balances[p] == depositAmount) { // Ensure they deposited
-                uint256 penalty = _calculatePenalty(arrivalTimes[p]);
-                if (penalty == 0 && arrivalTimes[p] != 0) {
-                    punctualParticipantsCount++;
+            uint256 bal = balances[p];
+            if (bal == depositAmount) { // Ensure they deposited
+                uint256 arrival = arrivalTimes[p];
+                uint256 penalty = _calculatePenalty(arrival);
+                if (penalty == 0 && arrival != 0) {
+                    punctual[i] = true;
                 }
                 totalPenalties += penalty;
-                balances[p] -= penalty; // Deduct penalty from their balance
+                // immediately update balance once (store write)
+                balances[p] = bal - penalty;
             }
+            unchecked { ++i; }
         }
 
         // Second pass: Distribute penalties to punctual participants
-        if (totalPenalties > 0 && punctualParticipantsCount > 0) {
-            uint256 rewardPerPunctual = totalPenalties / punctualParticipantsCount;
-            for (uint i = 0; i < participants.length; i++) {
-                address p = participants[i];
-                // A participant is punctual if they deposited, arrived, and had no penalty
-                if (balances[p] == (depositAmount - _calculatePenalty(arrivalTimes[p])) && arrivalTimes[p] != 0 && _calculatePenalty(arrivalTimes[p]) == 0) {
-                    balances[p] += rewardPerPunctual;
+        if (totalPenalties > 0) {
+            uint256 punctualCount = 0;
+            for (uint i = 0; i < n; ) {
+                if (punctual[i]) { punctualCount++; }
+                unchecked { ++i; }
+            }
+
+            if (punctualCount > 0) {
+                uint256 rewardPerPunctual = totalPenalties / punctualCount;
+                for (uint i = 0; i < n; ) {
+                    if (punctual[i]) {
+                        address p = participants[i];
+                        balances[p] += rewardPerPunctual;
+                    }
+                    unchecked { ++i; }
                 }
             }
         }
