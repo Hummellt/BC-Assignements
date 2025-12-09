@@ -49,6 +49,10 @@ function App() {
   const videoRef = useRef(null);
   const qrScannerRef = useRef(null);
 
+  // Manual input fallback when camera is unavailable
+  const [cameraError, setCameraError] = useState(false);
+  const [manualQrInput, setManualQrInput] = useState("");
+
   // Mutual attestation builder state
   const [otherAddressInput, setOtherAddressInput] = useState("");
   const [pendingMutual, setPendingMutual] = useState(null); // { a,b,ts,sigCallerForOther }
@@ -58,6 +62,14 @@ function App() {
   // ask wallet access
   useEffect(() => {
     window.ethereum?.enable?.();
+  }, []);
+
+  // detect basic camera support on load
+  useEffect(() => {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      setCameraError(true);
+      setStatus("Camera not available in this browser — use manual QR input below.");
+    }
   }, []);
 
   //  IPFS HASH
@@ -488,6 +500,16 @@ function App() {
     }
   }
 
+  // Process manual QR/CID pasted by the user
+  async function processManualInput() {
+    if (!manualQrInput || manualQrInput.trim() === "") {
+      setStatus("Paste attestation JSON or IPFS CID into the manual input field first.");
+      return;
+    }
+    setStatus("Processing manual input…");
+    await processScannedContent(manualQrInput.trim());
+  }
+
   function startScanner() {
     if (!videoRef.current) return;
     setStatus("Starting camera for QR scanning...");
@@ -505,9 +527,11 @@ function App() {
     qrScannerRef.current.start().then(() => {
       setScannerActive(true);
       setStatus("Scanner active. Point camera at QR.");
+      setCameraError(false);
     }).catch((e) => {
       console.error("Camera start failed", e);
       setStatus("Could not start camera: " + (e?.message ?? e));
+      setCameraError(true);
     });
   }
 
@@ -622,6 +646,36 @@ function App() {
             Run Diagnostics
           </button>
         </div>
+
+        {cameraError && (
+          <div style={{ width: 560, maxWidth: "100%", background: "#fff", padding: 12, borderRadius: 8, marginBottom: 12 }}>
+            <h4 style={{ margin: "0 0 8px 0", color: "#333" }}>Manual QR / CID input</h4>
+            <div style={{ fontSize: 13, color: "#333", marginBottom: 8 }}>
+              If the camera cannot be opened, paste the QR payload (JSON) or an IPFS CID here and press "Process".
+            </div>
+            <textarea
+              placeholder='Paste attestation JSON or IPFS CID (e.g. "Qm...")'
+              value={manualQrInput}
+              onChange={(e) => setManualQrInput(e.target.value)}
+              rows={4}
+              style={{ width: "100%", padding: 8, borderRadius: 4, border: "1px solid #ccc", fontFamily: "monospace" }}
+            />
+            <div style={{ marginTop: 8 }}>
+              <button className="btn" onClick={processManualInput} style={{ marginRight: 8 }}>
+                Process manual QR
+              </button>
+              <button
+                className="btn"
+                onClick={() => {
+                  setManualQrInput("");
+                  setStatus("");
+                }}
+              >
+                Clear
+              </button>
+            </div>
+          </div>
+        )}
 
         <div>
           <video ref={videoRef} style={{ width: 320, height: 240, border: "1px solid #ccc", borderRadius: 6 }} />
